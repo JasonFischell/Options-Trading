@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/ibkr-options-engine"]
+resolver = "2"

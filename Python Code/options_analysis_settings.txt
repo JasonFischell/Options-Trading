@@ -1,0 +1,26 @@
+
+# === OPTIONS ANALYSIS SETTINGS FILE ===
+# Lines starting with '#' are comments and will be ignored
+
+# File Names
+# INPUT_CSV = Russell_1000_to_2000_Tickers.csv
+# INPUT_CSV = Top_2000_Russell_Tickers.csv
+# INPUT_CSV = Russell_3000_Tickers.csv
+INPUT_CSV = Russell3000_tickers_V2.csv
+OUTPUT_CSV = Sorted_Options_List.csv
+
+# Thresholds
+DEFAULT_BETA = 1.5
+MYT = 0.05
+LBT = 0.2
+
+# Price Filtering
+MIN_PRICE = .5
+MAX_PRICE = 8
+
+# Expiration Filter (in days)
+MIN_EXPIRY_DAYS = 14
+MAX_EXPIRY_DAYS = 18
+
+# Contract Types to Analyze (CALL, PUT, or BOTH)
+CONTRACT_TYPE = CALL
