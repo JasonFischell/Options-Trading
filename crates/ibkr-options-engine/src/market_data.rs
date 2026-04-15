@@ -1,15 +1,18 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use csv::StringRecord;
 use regex::Regex;
+use tracing::warn;
 
 use crate::{
     config::AppConfig,
     ibkr::{
-        IbkrClientDescriptor, connect, fetch_account_state, fetch_positions, log_server_time,
+        IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
+        fetch_positions, is_invalid_option_contract_error, log_server_time,
         request_option_chain_for_underlying, request_option_quote, request_underlying_snapshot,
         resolve_primary_stock_contract_id, select_buy_write_contracts, switch_market_data_mode,
     },
@@ -86,11 +89,10 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             request_option_chain_for_underlying(&self.client, &record.symbol, contract_id).await?;
         let selected_contracts =
             select_buy_write_contracts(&record.symbol, &chains, reference_price, config)?;
-
-        let mut option_quotes = Vec::new();
-        for selected in selected_contracts {
-            option_quotes.push(request_option_quote(&self.client, &selected).await?);
-        }
+        let option_quotes = fetch_option_quotes_with(&selected_contracts, |selected| {
+            request_option_quote(&self.client, selected)
+        })
+        .await?;
 
         Ok(Some(SymbolMarketSnapshot {
             underlying,
@@ -200,6 +202,38 @@ fn parse_optional_f64(value: Option<&str>) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
+async fn fetch_option_quotes_with<F, Fut>(
+    selected_contracts: &[SelectedOptionContract],
+    mut fetch_quote: F,
+) -> Result<Vec<OptionQuoteSnapshot>>
+where
+    F: FnMut(SelectedOptionContract) -> Fut,
+    Fut: Future<Output = Result<OptionQuoteSnapshot>>,
+{
+    let mut option_quotes = Vec::new();
+
+    for selected in selected_contracts {
+        let selected = selected.clone();
+
+        match fetch_quote(selected.clone()).await {
+            Ok(option_quote) => option_quotes.push(option_quote),
+            Err(error) if is_invalid_option_contract_error(&error) => {
+                warn!(
+                    symbol = %selected.symbol,
+                    expiry = %selected.expiration,
+                    strike = selected.strike,
+                    right = %selected.right,
+                    error = %error,
+                    "skipping invalid IBKR option contract candidate"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(option_quotes)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -207,7 +241,9 @@ mod tests {
             AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
             StrategyConfig,
         },
-        market_data::load_universe,
+        ibkr::{OptionChainMetadata, SelectedOptionContract},
+        market_data::{fetch_option_quotes_with, load_universe},
+        models::OptionQuoteSnapshot,
     };
 
     #[test]
@@ -233,5 +269,68 @@ mod tests {
         let universe = load_universe(&config).unwrap();
         assert_eq!(universe.len(), 2);
         assert_eq!(universe[0].symbol, "AAPL");
+    }
+
+    #[tokio::test]
+    async fn skips_invalid_contract_errors_and_continues_collecting_quotes() {
+        let selected_contracts = vec![
+            SelectedOptionContract {
+                symbol: "AAPL".to_string(),
+                right: "C".to_string(),
+                expiration: "20991217".to_string(),
+                strike: 101.0,
+                chain_metadata: vec![OptionChainMetadata {
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    underlying_contract_id: 1,
+                }],
+            },
+            SelectedOptionContract {
+                symbol: "AAPL".to_string(),
+                right: "C".to_string(),
+                expiration: "20991217".to_string(),
+                strike: 102.0,
+                chain_metadata: vec![OptionChainMetadata {
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    underlying_contract_id: 1,
+                }],
+            },
+        ];
+
+        let option_quotes = fetch_option_quotes_with(&selected_contracts, |selected| async move {
+            if selected.strike == 101.0 {
+                return Err(anyhow::Error::new(ibapi::Error::Message(
+                    200,
+                    "No security definition has been found for the request".to_string(),
+                ))
+                .context("failed to resolve option contract details"));
+            }
+
+            Ok(OptionQuoteSnapshot {
+                symbol: selected.symbol.clone(),
+                expiry: selected.expiration.clone(),
+                strike: selected.strike,
+                right: selected.right.clone(),
+                exchange: "SMART".to_string(),
+                trading_class: "AAPL".to_string(),
+                multiplier: "100".to_string(),
+                bid: Some(1.25),
+                ask: Some(1.35),
+                last: Some(1.30),
+                close: Some(1.20),
+                option_price: Some(1.30),
+                implied_volatility: Some(0.22),
+                delta: Some(0.28),
+                underlying_price: Some(100.0),
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(option_quotes.len(), 1);
+        assert_eq!(option_quotes[0].strike, 102.0);
     }
 }
