@@ -1,14 +1,16 @@
 use anyhow::{Context, Result};
+use ibapi::accounts::{AccountSummaryResult, AccountSummaryTags, PositionUpdate};
 use ibapi::accounts::types::AccountGroup;
 use ibapi::market_data::MarketDataType;
 use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
-use ibapi::prelude::{
-    AccountSummaryResult, AccountSummaryTags, Client, Contract, Currency, Exchange, SecurityType,
-    Symbol,
-};
+use ibapi::prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol};
 use tokio::time::{Duration, timeout};
 
-use crate::config::AppConfig;
+use crate::{
+    config::{AppConfig, MarketDataMode},
+    models::{AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot},
+    strategy::parse_expiry_date,
+};
 
 #[derive(Debug, Clone)]
 pub struct IbkrClientDescriptor {
@@ -51,19 +53,6 @@ pub struct SnapshotSummary {
     pub underlying_price: Option<f64>,
 }
 
-impl SnapshotSummary {
-    pub fn reference_price(&self) -> Option<f64> {
-        self.last
-            .or(self.close)
-            .or_else(|| match (self.bid, self.ask) {
-                (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
-                (Some(bid), None) => Some(bid),
-                (None, Some(ask)) => Some(ask),
-                (None, None) => None,
-            })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SelectedOptionContract {
     pub symbol: String,
@@ -92,85 +81,73 @@ pub async fn connect(endpoint: &str, client_id: i32) -> Result<Client> {
         .with_context(|| format!("failed to connect to IBKR at {endpoint}"))
 }
 
-pub async fn log_account_summary(client: &Client) -> Result<()> {
+pub async fn fetch_account_state(client: &Client, account: &str) -> Result<AccountState> {
     let tags = &[
-        AccountSummaryTags::ACCOUNT_TYPE,
         AccountSummaryTags::NET_LIQUIDATION,
-        AccountSummaryTags::TOTAL_CASH_VALUE,
+        AccountSummaryTags::AVAILABLE_FUNDS,
         AccountSummaryTags::BUYING_POWER,
     ];
-
-    println!("Requesting IBKR account summary...");
 
     let mut subscription = client
         .account_summary(&AccountGroup("All".to_string()), tags)
         .await
         .context("failed to request IBKR account summary")?;
 
+    let mut state = AccountState {
+        account: account.to_string(),
+        available_funds: None,
+        buying_power: None,
+        net_liquidation: None,
+    };
+
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive IBKR account summary update")? {
             AccountSummaryResult::Summary(summary) => {
-                if summary.currency.is_empty() {
-                    println!(
-                        "Account summary: account={} tag={} value={}",
-                        summary.account, summary.tag, summary.value
-                    );
-                } else {
-                    println!(
-                        "Account summary: account={} tag={} value={} currency={}",
-                        summary.account, summary.tag, summary.value, summary.currency
-                    );
+                if summary.account != account {
+                    continue;
+                }
+
+                let parsed_value = summary.value.parse::<f64>().ok();
+                match summary.tag.as_str() {
+                    AccountSummaryTags::AVAILABLE_FUNDS => state.available_funds = parsed_value,
+                    AccountSummaryTags::BUYING_POWER => state.buying_power = parsed_value,
+                    AccountSummaryTags::NET_LIQUIDATION => state.net_liquidation = parsed_value,
+                    _ => {}
                 }
             }
-            AccountSummaryResult::End => {
-                println!("Account summary request complete.");
-                break;
-            }
+            AccountSummaryResult::End => break,
         }
     }
 
-    Ok(())
+    Ok(state)
 }
 
-pub async fn log_stock_contract_details(client: &Client, symbols: &[String]) -> Result<()> {
-    for symbol in symbols {
-        println!("Requesting contract details for {}...", symbol);
+pub async fn fetch_positions(client: &Client) -> Result<Vec<InventoryPosition>> {
+    let mut subscription = client
+        .positions()
+        .await
+        .context("failed to request IBKR positions")?;
 
-        let contract = Contract {
-            symbol: Symbol::from(symbol.as_str()),
-            security_type: SecurityType::Stock,
-            exchange: Exchange::from("SMART"),
-            currency: Currency::from("USD"),
-            ..Default::default()
-        };
-
-        let details = client
-            .contract_details(&contract)
-            .await
-            .with_context(|| format!("failed to request contract details for {symbol}"))?;
-
-        println!(
-            "Received {} contract detail match(es) for {}.",
-            details.len(),
-            symbol
-        );
-
-        if let Some(primary) = details.first() {
-            println!(
-                "Primary match: symbol={} local_symbol={} contract_id={} exchange={} primary_exchange={} currency={} long_name={} min_tick={}",
-                primary.contract.symbol,
-                primary.contract.local_symbol,
-                primary.contract.contract_id,
-                primary.contract.exchange,
-                primary.contract.primary_exchange,
-                primary.contract.currency,
-                primary.long_name,
-                primary.min_tick
-            );
+    let mut positions = Vec::new();
+    while let Some(result) = subscription.next().await {
+        match result.context("failed to receive position update")? {
+            PositionUpdate::Position(position) => positions.push(InventoryPosition {
+                account: position.account.clone(),
+                symbol: position.contract.symbol.to_string(),
+                security_type: position.contract.security_type.to_string(),
+                quantity: position.position,
+                average_cost: position.average_cost,
+                expiry: (!position.contract.last_trade_date_or_contract_month.is_empty())
+                    .then(|| position.contract.last_trade_date_or_contract_month.clone()),
+                strike: (position.contract.strike > 0.0).then_some(position.contract.strike),
+                right: (!position.contract.right.is_empty())
+                    .then(|| position.contract.right.clone()),
+            }),
+            PositionUpdate::PositionEnd => break,
         }
     }
 
-    Ok(())
+    Ok(positions)
 }
 
 pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) -> Result<i32> {
@@ -194,16 +171,11 @@ pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) ->
     Ok(primary.contract.contract_id)
 }
 
-pub async fn log_option_chain_for_underlying(
+pub async fn request_option_chain_for_underlying(
     client: &Client,
     symbol: &str,
     contract_id: i32,
 ) -> Result<Vec<OptionChainSummary>> {
-    println!(
-        "Requesting option chain for {} using underlying contract_id={}...",
-        symbol, contract_id
-    );
-
     let mut option_chain_stream = client
         .option_chain(symbol, "", SecurityType::Stock, contract_id)
         .await
@@ -221,16 +193,6 @@ pub async fn log_option_chain_for_underlying(
             Ok(item) => item,
             Err(_) => {
                 if chain_count == 0 {
-                    println!(
-                        "No option chain data arrived for {} within {} seconds.",
-                        symbol,
-                        idle_timeout.as_secs()
-                    );
-                } else {
-                    println!(
-                        "Option chain stream idle after {} response(s); ending diagnostic request for {}.",
-                        chain_count, symbol
-                    );
                 }
                 break;
             }
@@ -252,73 +214,26 @@ pub async fn log_option_chain_for_underlying(
             strikes: chain.strikes.clone(),
         });
 
-        let expirations_preview = if chain.expirations.is_empty() {
-            "none".to_string()
-        } else {
-            chain
-                .expirations
-                .iter()
-                .take(5)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let strikes_preview = if chain.strikes.is_empty() {
-            "none".to_string()
-        } else {
-            chain
-                .strikes
-                .iter()
-                .take(5)
-                .map(|strike| format!("{strike:.2}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        println!(
-            "Option chain {}: exchange={} trading_class={} multiplier={} underlying_contract_id={}",
-            chain_count,
-            chain.exchange,
-            chain.trading_class,
-            chain.multiplier,
-            chain.underlying_contract_id
-        );
-        println!(
-            "  Expirations sample ({} total): {}",
-            chain.expirations.len(),
-            expirations_preview
-        );
-        println!(
-            "  Strikes sample ({} total): {}",
-            chain.strikes.len(),
-            strikes_preview
-        );
-
         if chain_count >= max_chain_messages {
-            println!(
-                "Read {} option chain response(s); ending diagnostic request for {}.",
-                chain_count, symbol
-            );
             break;
         }
-    }
-
-    if chain_count == 0 {
-        println!("No option chain data returned for {}.", symbol);
-    } else {
-        println!("Option chain request complete for {}.", symbol);
     }
 
     Ok(summaries)
 }
 
-pub async fn switch_to_frozen_market_data(client: &Client) -> Result<()> {
+pub async fn switch_market_data_mode(client: &Client, mode: MarketDataMode) -> Result<()> {
+    let ibkr_mode = match mode {
+        MarketDataMode::Live => MarketDataType::Realtime,
+        MarketDataMode::Frozen => MarketDataType::Frozen,
+        MarketDataMode::Delayed => MarketDataType::Delayed,
+        MarketDataMode::DelayedFrozen => MarketDataType::DelayedFrozen,
+    };
+
     client
-        .switch_market_data_type(MarketDataType::Frozen)
+        .switch_market_data_type(ibkr_mode)
         .await
-        .context("failed to switch IBKR market data type to Frozen")?;
-    println!("Switched IBKR market data type to Frozen for after-hours snapshot testing.");
+        .context("failed to switch IBKR market data mode")?;
     Ok(())
 }
 
@@ -328,8 +243,6 @@ pub async fn request_snapshot(
     generic_ticks: &[&str],
     label: &str,
 ) -> Result<SnapshotSummary> {
-    println!("Requesting snapshot market data for {}...", label);
-
     let mut subscription = client
         .market_data(contract)
         .generic_ticks(generic_ticks)
@@ -345,14 +258,7 @@ pub async fn request_snapshot(
         let next_item = timeout(idle_timeout, subscription.next()).await;
         let next_stream_item = match next_item {
             Ok(item) => item,
-            Err(_) => {
-                println!(
-                    "Snapshot for {} timed out after {} seconds.",
-                    label,
-                    idle_timeout.as_secs()
-                );
-                break;
-            }
+            Err(_) => break,
         };
 
         let Some(result) = next_stream_item else {
@@ -383,74 +289,109 @@ pub async fn request_snapshot(
                 }
             }
             TickTypes::Notice(notice) => {
-                println!(
-                    "Market data notice for {}: code={} message={}",
-                    label, notice.code, notice.message
-                );
+                let _ = (notice.code, notice.message);
             }
-            TickTypes::SnapshotEnd => {
-                println!("Snapshot request complete for {}.", label);
-                break;
-            }
+            TickTypes::SnapshotEnd => break,
             _ => {}
         }
     }
 
-    println!(
-        "Snapshot summary for {}: bid={:?} ask={:?} last={:?} close={:?} option_price={:?} implied_volatility={:?} delta={:?} underlying_price={:?}",
-        label,
-        summary.bid,
-        summary.ask,
-        summary.last,
-        summary.close,
-        summary.option_price,
-        summary.implied_volatility,
-        summary.delta,
-        summary.underlying_price
-    );
-
     Ok(summary)
 }
 
-pub fn select_option_contract(
+pub async fn request_underlying_snapshot(client: &Client, symbol: &str) -> Result<UnderlyingSnapshot> {
+    let contract = Contract::stock(symbol).build();
+    let snapshot = request_snapshot(client, &contract, &[], &format!("{symbol} underlying")).await?;
+    let price = snapshot
+        .last
+        .or(snapshot.close)
+        .or_else(|| match (snapshot.bid, snapshot.ask) {
+            (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
+            (Some(bid), None) => Some(bid),
+            (None, Some(ask)) => Some(ask),
+            (None, None) => None,
+        })
+        .unwrap_or_default();
+
+    Ok(UnderlyingSnapshot {
+        symbol: symbol.to_string(),
+        price,
+        bid: snapshot.bid,
+        ask: snapshot.ask,
+        last: snapshot.last,
+        close: snapshot.close,
+        implied_volatility: snapshot.implied_volatility,
+        beta: None,
+    })
+}
+
+pub fn select_buy_write_contracts(
     symbol: &str,
     chains: &[OptionChainSummary],
     reference_price: f64,
-) -> Result<SelectedOptionContract> {
-    let chain = chains
-        .iter()
-        .find(|chain| !chain.expirations.is_empty() && !chain.strikes.is_empty())
-        .with_context(|| format!("no usable option chain responses found for {symbol}"))?;
+    config: &AppConfig,
+) -> Result<Vec<SelectedOptionContract>> {
+    let min_strike = reference_price * (1.0 + config.strategy.min_strike_buffer_pct);
+    let mut candidates = Vec::new();
 
-    let expiration = chain
-        .expirations
-        .iter()
-        .min()
-        .with_context(|| format!("no expiration dates available for {symbol}"))?
-        .clone();
+    for chain in chains {
+        for expiration in &chain.expirations {
+            let expiry_date = match parse_expiry_date(expiration) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let days_to_expiration = (expiry_date - chrono::Utc::now().date_naive()).num_days();
+            if days_to_expiration < config.strategy.min_expiry_days
+                || days_to_expiration > config.strategy.max_expiry_days
+            {
+                continue;
+            }
 
-    let strike = chain
-        .strikes
-        .iter()
-        .min_by(|left, right| {
-            (*left - reference_price)
-                .abs()
-                .partial_cmp(&(*right - reference_price).abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .copied()
-        .with_context(|| format!("no strikes available for {symbol}"))?;
+            let mut strikes = chain
+                .strikes
+                .iter()
+                .copied()
+                .filter(|strike| *strike >= min_strike)
+                .collect::<Vec<_>>();
+            strikes.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-    Ok(SelectedOptionContract {
-        symbol: symbol.to_string(),
-        right: "C".to_string(),
-        expiration,
-        strike,
-        exchange: chain.exchange.clone(),
-        trading_class: chain.trading_class.clone(),
-        multiplier: chain.multiplier.clone(),
-        underlying_contract_id: chain.underlying_contract_id,
-    })
+            for strike in strikes.into_iter().take(config.risk.max_option_quotes_per_underlying) {
+                candidates.push(SelectedOptionContract {
+                    symbol: symbol.to_string(),
+                    right: "C".to_string(),
+                    expiration: expiration.clone(),
+                    strike,
+                    exchange: chain.exchange.clone(),
+                    trading_class: chain.trading_class.clone(),
+                    multiplier: chain.multiplier.clone(),
+                    underlying_contract_id: chain.underlying_contract_id,
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        left.expiration
+            .cmp(&right.expiration)
+            .then_with(|| {
+                (left.strike - reference_price)
+                    .abs()
+                    .partial_cmp(&(right.strike - reference_price).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    candidates.dedup_by(|left, right| {
+        left.expiration == right.expiration
+            && left.strike == right.strike
+            && left.trading_class == right.trading_class
+    });
+    candidates.truncate(config.risk.max_option_quotes_per_underlying);
+
+    if candidates.is_empty() {
+        anyhow::bail!("no buy-write option contracts matched for {symbol}");
+    }
+
+    Ok(candidates)
 }
 
 pub async fn resolve_option_contract(
@@ -484,18 +425,6 @@ pub async fn resolve_option_contract(
         )
     })?;
 
-    println!(
-        "Resolved option contract: symbol={} local_symbol={} contract_id={} expiry={} strike={} right={} exchange={} trading_class={}",
-        primary.contract.symbol,
-        primary.contract.local_symbol,
-        primary.contract.contract_id,
-        primary.contract.last_trade_date_or_contract_month,
-        primary.contract.strike,
-        primary.contract.right,
-        primary.contract.exchange,
-        primary.contract.trading_class
-    );
-
     Ok(Contract {
         contract_id: primary.contract.contract_id,
         symbol: primary.contract.symbol.clone(),
@@ -516,6 +445,42 @@ pub async fn resolve_option_contract(
     })
 }
 
+pub async fn request_option_quote(
+    client: &Client,
+    selected: &SelectedOptionContract,
+) -> Result<OptionQuoteSnapshot> {
+    let option_contract = resolve_option_contract(client, selected).await?;
+    let option_label = format!(
+        "{} {} {} {}",
+        selected.symbol, selected.expiration, selected.right, selected.strike
+    );
+    let snapshot = request_snapshot(
+        client,
+        &option_contract,
+        &["100", "101", "104", "106"],
+        &option_label,
+    )
+    .await?;
+
+    Ok(OptionQuoteSnapshot {
+        symbol: selected.symbol.clone(),
+        expiry: selected.expiration.clone(),
+        strike: selected.strike,
+        right: selected.right.clone(),
+        exchange: selected.exchange.clone(),
+        trading_class: selected.trading_class.clone(),
+        multiplier: selected.multiplier.clone(),
+        bid: snapshot.bid,
+        ask: snapshot.ask,
+        last: snapshot.last,
+        close: snapshot.close,
+        option_price: snapshot.option_price,
+        implied_volatility: snapshot.implied_volatility,
+        delta: snapshot.delta,
+        underlying_price: snapshot.underlying_price,
+    })
+}
+
 fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickType, price: f64) {
     match tick_type {
         TickType::Bid | TickType::DelayedBid => summary.bid = Some(price),
@@ -532,38 +497,47 @@ fn update_snapshot_from_price_size(summary: &mut SnapshotSummary, tick: &TickPri
 
 #[cfg(test)]
 mod tests {
-    use super::{OptionChainSummary, SnapshotSummary, select_option_contract};
+    use super::{OptionChainSummary, select_buy_write_contracts};
+    use crate::config::{AppConfig, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig};
 
     #[test]
-    fn reference_price_prefers_last_then_close_then_midpoint() {
-        let summary = SnapshotSummary {
-            bid: Some(9.0),
-            ask: Some(11.0),
-            last: None,
-            close: Some(10.5),
-            option_price: None,
-            implied_volatility: None,
-            delta: None,
-            underlying_price: None,
-        };
-
-        assert_eq!(summary.reference_price(), Some(10.5));
-    }
-
-    #[test]
-    fn selects_nearest_strike_on_earliest_expiration() {
+    fn selects_otm_contracts_on_earliest_expiration() {
         let chains = vec![OptionChainSummary {
             underlying_contract_id: 123,
             trading_class: "PTON".to_string(),
             multiplier: "100".to_string(),
             exchange: "NASDAQOM".to_string(),
-            expirations: vec!["20260417".to_string(), "20260424".to_string()],
+            expirations: vec!["20991217".to_string(), "21000121".to_string()],
             strikes: vec![4.0, 4.5, 5.0, 5.5],
         }];
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            port: 4002,
+            client_id: 100,
+            account: "DU123456".to_string(),
+            mode: RuntimeMode::Paper,
+            read_only: true,
+            connect_on_start: false,
+            run_mode: RunMode::Manual,
+            scan_schedule: "manual".to_string(),
+            market_data_mode: MarketDataMode::DelayedFrozen,
+            universe_file: None,
+            symbols: vec!["PTON".to_string()],
+            strategy: StrategyConfig {
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                min_strike_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+            risk: RiskConfig {
+                max_option_quotes_per_underlying: 2,
+                ..RiskConfig::default()
+            },
+        };
 
-        let selected = select_option_contract("PTON", &chains, 4.6).unwrap();
-        assert_eq!(selected.expiration, "20260417");
-        assert_eq!(selected.strike, 4.5);
-        assert_eq!(selected.right, "C");
+        let selected = select_buy_write_contracts("PTON", &chains, 4.6, &config).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].expiration, "20991217");
+        assert_eq!(selected[0].right, "C");
     }
 }

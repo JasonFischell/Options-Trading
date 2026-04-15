@@ -74,6 +74,10 @@ mod tests {
         let snapshot = UnderlyingSnapshot {
             symbol: "AAPL".to_string(),
             price: 180.0,
+            bid: None,
+            ask: None,
+            last: None,
+            close: None,
             implied_volatility: None,
             beta: Some(1.1),
         };
@@ -101,6 +105,10 @@ mod tests {
         let snapshot = UnderlyingSnapshot {
             symbol: "MSFT".to_string(),
             price: 0.0,
+            bid: None,
+            ask: None,
+            last: None,
+            close: None,
             implied_volatility: None,
             beta: Some(1.0),
         };

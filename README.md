@@ -1,61 +1,84 @@
 # Options Trading
 
-This repository is for a real-time options analysis and execution system that will integrate with the Interactive Brokers API.
+This repository is building a Rust-first IBKR options scanner and automation engine. The production path is now centered on `crates/ibkr-options-engine`, while `Python Code/` remains a parity/reference harness only.
 
-The current implementation lives in the `Python Code` folder and performs batch-style analysis using:
+The current vertical slice is designed around token-efficient Codex sessions:
 
-- A configurable ticker universe loaded from CSV
-- External market-data lookups that should now be replaced by IBKR
-- User-defined thresholds for price, expiration window, and contract type
-- Ranking metrics used to produce a sorted candidate list
+- scheduled batch scans instead of an always-on daemon
+- delayed or delayed-frozen snapshots before live data
+- a small watchlist first, then controlled expansion
+- guarded dry-run buy-write intent generation before broker submission
 
-## Current Python Baseline
+## Current Architecture
 
-The existing script reads settings from `options_analysis_settings.txt`, filters the input universe, requests live market data from Finnhub, scores nearby call/put contracts, and exports a sorted CSV of trade candidates.
+The Rust crate is organized around the runtime layers we want long term:
 
-Key limitations in the current baseline:
+- `config`: env-driven runtime, market-data, schedule, and guardrail settings
+- `market_data`: watchlist loading plus the replay-testable market-data boundary
+- `ibkr`: narrow Interactive Brokers adapter for connectivity, snapshots, positions, and chains
+- `strategy`: covered-call candidate evaluation and basic exit logic
+- `state`: portfolio summaries and buy-write order-intent guardrails
+- `execution`: guarded dry-run execution layer
+- `scanner`: end-to-end cycle orchestration and cycle-report generation
+- `scoring`: legacy/reference scoring math carried forward for parity work
 
-- Sequential requests will not scale well to thousands of symbols in real time
-- Market data and execution are split across systems instead of using IBKR end to end
-- API credentials are hard-coded in the script and should be moved into environment-based configuration
-- The project is structured as a single script rather than a testable, modular system
+The engine currently supports:
 
-## Proposed Near-Term Direction
+- loading a starter universe from CSV or `IBKR_SYMBOLS`
+- connecting to IBKR and switching market-data modes
+- fetching account state, positions, underlying snapshots, option chains, and option quotes
+- ranking covered-call buy-write candidates with conservative liquidity filters
+- generating guarded dry-run order intents
+- emitting a structured cycle report as JSON
 
-We should use the Python script as the functional reference while we design a faster runtime for the production scanner and execution engine.
+## Development Roadmap
 
-Strong candidates:
+### Phase A
 
-- Rust: best fit for low-latency concurrent analysis, memory safety, and long-running services
-- C#: strong option if Windows tooling and Interactive Brokers ecosystem support become a priority
-- Go: simpler concurrency model, but less ideal if we need tight numeric optimization and strict latency control
+- Preserve Python parity logic as a reference
+- Keep the Rust scanner deterministic and testable
+- Use small watchlists plus replay-style tests
 
-Recommended first target: Rust for the analysis/execution service, while keeping the Python script only as a temporary validation harness during migration.
+### Phase B
 
-## Rust Scaffold
+- Run delayed-data scans on 25-100 symbols
+- Tune request budgets to stay comfortably below IBKR line limits
+- Improve diagnostics and cycle reporting
 
-The new Rust workspace is centered on `crates/ibkr-options-engine`.
+### Phase C
 
-Its initial shape is:
+- Harden buy-write order construction
+- Add paper-trading submission behind explicit flags
+- Reconcile fills, positions, and duplicate-symbol prevention
 
-- `config`: environment-driven runtime configuration
-- `ibkr`: broker connectivity and market-data adapter boundary
-- `scanner`: orchestration for symbol analysis runs
-- `scoring`: deterministic option scoring logic
-- `models`: shared domain types for quotes, contracts, and ranked candidates
+### Phase D
 
-The scaffold assumes IBKR is the source for both market data and order execution. Finnhub is not part of the target architecture.
+- Poll open paper positions
+- Apply basic profit-take and max-loss exits
+- Extend reporting around lifecycle events
+
+### Later Phases
+
+- selective live-data upgrade for paper trading
+- larger universe management with measured batching changes
+- live-money readiness only after paper stability
+- optional historical-options backtesting on a separate data track
+
+## Running The Current Scanner
+
+1. Copy `.env.example` to `.env`
+2. Point `UNIVERSE_FILE` to `docs/starter_watchlist.csv` or set `IBKR_SYMBOLS`
+3. Keep `IBKR_READ_ONLY=true` and `ENABLE_PAPER_ORDERS=false` for early testing
+4. Set `IBKR_CONNECT_ON_START=true` only when IB Gateway or TWS paper is running
+5. Run `cargo test`
+6. Run `cargo run -p ibkr-options-engine`
+
+The current execution layer is intentionally dry-run only, even if `ENABLE_PAPER_ORDERS=true`. That flag is present now so the runtime contract is stable before real order submission is introduced.
 
 ## Repository Layout
 
-- `Python Code/`: existing baseline implementation and inputs
-- `docs/`: project notes, review findings, and setup instructions
-- `crates/ibkr-options-engine/`: Rust analysis and execution engine
+- `AGENTS.md`: Codex workflow rules for this project
+- `Python Code/`: legacy baseline and input artifacts
+- `docs/`: setup docs, notes, and starter watchlist
+- `crates/ibkr-options-engine/`: Rust scanner and execution engine
 - `.env.example`: local configuration template
-
-## Next Steps
-
-1. Replace the placeholder scanner with real IBKR contract discovery and option-chain requests
-2. Port the Python scoring math into tested Rust modules
-3. Add paper-trading order submission and execution monitoring
-4. Add risk controls, rate limiting, and replayable integration tests
