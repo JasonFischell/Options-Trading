@@ -18,6 +18,40 @@ impl RuntimeMode {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BrokerPlatform {
+    Gateway,
+    Tws,
+}
+
+impl BrokerPlatform {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "gateway" | "ibgateway" | "ib-gateway" => Ok(Self::Gateway),
+            "tws" => Ok(Self::Tws),
+            other => anyhow::bail!("unsupported IBKR platform: {other}"),
+        }
+    }
+
+    pub fn default_port(self, mode: RuntimeMode) -> u16 {
+        match (self, mode) {
+            (Self::Gateway, RuntimeMode::Paper) => 4002,
+            (Self::Gateway, RuntimeMode::Live) => 4001,
+            (Self::Tws, RuntimeMode::Paper) => 7497,
+            (Self::Tws, RuntimeMode::Live) => 7496,
+        }
+    }
+
+    pub fn expected_port_hint(self, mode: RuntimeMode) -> &'static str {
+        match (self, mode) {
+            (Self::Gateway, RuntimeMode::Paper) => "4002",
+            (Self::Gateway, RuntimeMode::Live) => "4001",
+            (Self::Tws, RuntimeMode::Paper) => "7497",
+            (Self::Tws, RuntimeMode::Live) => "7496",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunMode {
     Manual,
     Scheduled,
@@ -116,6 +150,7 @@ impl Default for RiskConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub host: String,
+    pub platform: BrokerPlatform,
     pub port: u16,
     pub client_id: i32,
     pub account: String,
@@ -134,14 +169,20 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let host = env_var("IBKR_HOST")?;
-        let port = env_var("IBKR_PORT")?
-            .parse()
-            .context("IBKR_PORT must be a valid u16")?;
+        let mode = RuntimeMode::parse(&env_var("IBKR_RUNTIME_MODE")?)?;
+        let platform = BrokerPlatform::parse(&env_or_default("IBKR_PLATFORM", "gateway")?)?;
+        let port = optional_env("IBKR_PORT")
+            .map(|value| {
+                value
+                    .parse()
+                    .context("IBKR_PORT must be a valid u16")
+            })
+            .transpose()?
+            .unwrap_or_else(|| platform.default_port(mode));
         let client_id = env_var("IBKR_CLIENT_ID")?
             .parse()
             .context("IBKR_CLIENT_ID must be a valid i32")?;
         let account = env_var("IBKR_ACCOUNT")?;
-        let mode = RuntimeMode::parse(&env_var("IBKR_RUNTIME_MODE")?)?;
         let read_only = parse_bool(&env_var("IBKR_READ_ONLY")?)?;
         let connect_on_start = parse_bool(&env_var("IBKR_CONNECT_ON_START")?)?;
         let run_mode = RunMode::parse(&env_or_default("RUN_MODE", "manual")?)?;
@@ -162,6 +203,7 @@ impl AppConfig {
 
         Ok(Self {
             host,
+            platform,
             port,
             client_id,
             account,
@@ -281,6 +323,16 @@ impl AppConfig {
     pub fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+
+    pub fn connection_guidance(&self) -> String {
+        format!(
+            "Targeting {:?} {:?} at {}. Expected default port is {}. In IB Gateway, enable Configure > Settings > API > Settings > Enable ActiveX and Socket Clients, and allow localhost or add 127.0.0.1 to Trusted IPs if needed.",
+            self.platform,
+            self.mode,
+            self.endpoint(),
+            self.platform.expected_port_hint(self.mode)
+        )
+    }
 }
 
 fn env_var(key: &str) -> Result<String> {
@@ -317,7 +369,7 @@ pub fn parse_symbols(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MarketDataMode, RunMode, RuntimeMode, parse_bool, parse_symbols};
+    use super::{BrokerPlatform, MarketDataMode, RunMode, RuntimeMode, parse_bool, parse_symbols};
 
     #[test]
     fn parses_bool_flags() {
@@ -344,5 +396,11 @@ mod tests {
             MarketDataMode::parse("delayed-frozen").unwrap(),
             MarketDataMode::DelayedFrozen
         );
+    }
+
+    #[test]
+    fn gateway_default_port_matches_mode() {
+        assert_eq!(BrokerPlatform::Gateway.default_port(RuntimeMode::Paper), 4002);
+        assert_eq!(BrokerPlatform::Gateway.default_port(RuntimeMode::Live), 4001);
     }
 }

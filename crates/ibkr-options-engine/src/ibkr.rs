@@ -498,7 +498,7 @@ fn update_snapshot_from_price_size(summary: &mut SnapshotSummary, tick: &TickPri
 #[cfg(test)]
 mod tests {
     use super::{OptionChainSummary, select_buy_write_contracts};
-    use crate::config::{AppConfig, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig};
+    use crate::config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig};
 
     #[test]
     fn selects_otm_contracts_on_earliest_expiration() {
@@ -512,6 +512,7 @@ mod tests {
         }];
         let config = AppConfig {
             host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
             port: 4002,
             client_id: 100,
             account: "DU123456".to_string(),

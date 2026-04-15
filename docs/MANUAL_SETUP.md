@@ -10,24 +10,26 @@ Install the following on the development machine:
 2. Python 3.11+ only if you want to run the legacy baseline script during migration
 3. A code editor or IDE
 4. Rust via `rustup`
-5. TWS or IB Gateway from Interactive Brokers
+5. IB Gateway from Interactive Brokers
+6. TWS only if you want a separate manual-debugging UI
 
 ## 2. Create Accounts And API Access
 
 1. Confirm you have an Interactive Brokers account with paper trading enabled
 2. Confirm your IBKR market-data subscriptions cover the symbols and options markets you want to trade
-3. Decide whether early development will use TWS paper trading or IB Gateway paper trading
+3. Default to IB Gateway paper trading for automation and scheduled runs
 
 ## 3. Enable Interactive Brokers API Access
 
-In TWS or IB Gateway:
+In IB Gateway:
 
 1. Log in to paper trading first
-2. Open API settings
-3. Enable socket/API clients
-4. Note the host and port values
-5. Restrict trusted IPs as needed for local development
-6. Decide whether read-only mode should stay enabled during early testing
+2. Open `Configure > Settings > API > Settings`
+3. Enable `ActiveX and Socket Clients`
+4. Confirm the API port
+5. For paper Gateway, default expectation is `4002`
+6. Allow localhost connections or add `127.0.0.1` to trusted IPs if you use the trusted-IP setting
+7. Keep read-only mode enabled during early testing unless you intentionally begin paper-order submission
 
 ## 4. Move Secrets Out Of Source Code
 
@@ -40,6 +42,7 @@ Before we add broker connectivity:
 Suggested variables:
 
 - `IBKR_HOST`
+- `IBKR_PLATFORM`
 - `IBKR_PORT`
 - `IBKR_CLIENT_ID`
 - `IBKR_ACCOUNT`
@@ -73,7 +76,14 @@ From the repository root:
 
 1. Open a new terminal after the Rust install so `cargo` and `rg` are on `PATH`
 2. Copy `.env.example` to `.env`
-3. Start TWS or IB Gateway in paper mode
+3. Start IB Gateway in paper mode
 4. Run `cargo build`
 5. Run `cargo run -p ibkr-options-engine`
 6. Set `IBKR_CONNECT_ON_START=true` only when you want the app to test a real broker connection at startup
+
+Recommended starting values:
+
+- `IBKR_PLATFORM=gateway`
+- `IBKR_PORT=4002`
+- `IBKR_RUNTIME_MODE=paper`
+- `IBKR_READ_ONLY=true`

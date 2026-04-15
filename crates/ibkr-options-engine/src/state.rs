@@ -163,7 +163,7 @@ pub fn build_order_intents(
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AppConfig, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
         models::{AccountState, InventoryPosition, ScoredOptionCandidate},
         state::{build_order_intents, summarize_open_positions},
     };
@@ -171,6 +171,7 @@ mod tests {
     fn test_config() -> AppConfig {
         AppConfig {
             host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
             port: 4002,
             client_id: 100,
             account: "DU1234567".to_string(),

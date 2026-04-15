@@ -147,7 +147,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::{
-        config::{AppConfig, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
         models::{
@@ -212,6 +212,7 @@ mod tests {
     fn test_config() -> AppConfig {
         AppConfig {
             host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
             port: 4002,
             client_id: 100,
             account: "DU123".to_string(),

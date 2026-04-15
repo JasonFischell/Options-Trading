@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     let plan = build_scan_plan(&config, &symbols);
 
     info!(
+        platform = ?config.platform,
         endpoint = %config.endpoint(),
         client_id = config.client_id,
         account = %config.account,
@@ -32,13 +33,22 @@ async fn main() -> Result<()> {
         execution_mode = plan.execution_mode,
         "loaded IBKR engine configuration"
     );
+    info!("{}", config.connection_guidance());
 
     if !config.connect_on_start {
         warn!("IBKR_CONNECT_ON_START is false; skipping live connectivity probe");
         return Ok(());
     }
 
-    let provider = IbkrMarketDataProvider::connect(&config).await?;
+    let provider = IbkrMarketDataProvider::connect(&config)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}\nConnection checklist: {}\nIf IB Gateway is already open, confirm API sockets are enabled and that the configured port matches the Gateway session.",
+                error,
+                config.connection_guidance()
+            )
+        })?;
     let executor = GuardedDryRunExecutor;
     let report = run_scan_cycle(&provider, &executor, &config).await?;
     println!("{}", serde_json::to_string_pretty(&report)?);

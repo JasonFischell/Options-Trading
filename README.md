@@ -8,6 +8,7 @@ The current vertical slice is designed around token-efficient Codex sessions:
 - delayed or delayed-frozen snapshots before live data
 - a small watchlist first, then controlled expansion
 - guarded dry-run buy-write intent generation before broker submission
+- IB Gateway as the default broker runtime for unattended or semi-attended scans
 
 ## Current Architecture
 
@@ -67,11 +68,15 @@ The engine currently supports:
 ## Running The Current Scanner
 
 1. Copy `.env.example` to `.env`
-2. Point `UNIVERSE_FILE` to `docs/starter_watchlist.csv` or set `IBKR_SYMBOLS`
-3. Keep `IBKR_READ_ONLY=true` and `ENABLE_PAPER_ORDERS=false` for early testing
-4. Set `IBKR_CONNECT_ON_START=true` only when IB Gateway or TWS paper is running
-5. Run `cargo test`
-6. Run `cargo run -p ibkr-options-engine`
+2. Keep `IBKR_PLATFORM=gateway` unless you intentionally want TWS
+3. For paper Gateway, use `IBKR_PORT=4002` unless your Gateway settings show a different API port
+4. Point `UNIVERSE_FILE` to `docs/starter_watchlist.csv` or set `IBKR_SYMBOLS`
+5. Keep `IBKR_READ_ONLY=true` and `ENABLE_PAPER_ORDERS=false` for early testing
+6. Set `IBKR_CONNECT_ON_START=true` only when IB Gateway or TWS paper is running
+7. In IB Gateway, enable `Configure > Settings > API > Settings > Enable ActiveX and Socket Clients`
+8. If localhost is restricted, add `127.0.0.1` to trusted IPs
+9. Run `cargo test`
+10. Run `cargo run -p ibkr-options-engine`
 
 The current execution layer is intentionally dry-run only, even if `ENABLE_PAPER_ORDERS=true`. That flag is present now so the runtime contract is stable before real order submission is introduced.
 

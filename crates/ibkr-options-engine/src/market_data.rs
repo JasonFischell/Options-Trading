@@ -195,7 +195,7 @@ fn parse_optional_f64(value: Option<&str>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AppConfig, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
         market_data::load_universe,
     };
 
@@ -203,6 +203,7 @@ mod tests {
     fn falls_back_to_symbols_when_no_csv_is_set() {
         let config = AppConfig {
             host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
             port: 4002,
             client_id: 100,
             account: "DU123".to_string(),
