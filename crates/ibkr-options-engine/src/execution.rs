@@ -601,33 +601,32 @@ fn reconcile_buy_write_fill(
         (None, None) => None,
     };
 
-    let (status, note) = if option_summary.is_none()
-        && stock_summary.is_fully_filled(stock_leg.quantity)
-    {
-        (
-            "stock-filled-awaiting-short-call".to_string(),
-            "stock fill reconciled; short-call leg is now eligible for submission".to_string(),
-        )
-    } else if option_summary
-        .map(|summary| summary.is_fully_filled(option_leg.quantity))
-        .unwrap_or(false)
-    {
-        (
-            "covered-call-open".to_string(),
-            "stock and short-call fills reconcile to a covered paper position".to_string(),
-        )
-    } else if option_summary.is_some() {
-        (
+    let (status, note) =
+        if option_summary.is_none() && stock_summary.is_fully_filled(stock_leg.quantity) {
+            (
+                "stock-filled-awaiting-short-call".to_string(),
+                "stock fill reconciled; short-call leg is now eligible for submission".to_string(),
+            )
+        } else if option_summary
+            .map(|summary| summary.is_fully_filled(option_leg.quantity))
+            .unwrap_or(false)
+        {
+            (
+                "covered-call-open".to_string(),
+                "stock and short-call fills reconcile to a covered paper position".to_string(),
+            )
+        } else if option_summary.is_some() {
+            (
             "short-call-submitted".to_string(),
             "stock fill reconciled; short-call leg has been submitted and is still pending fill"
                 .to_string(),
         )
-    } else {
-        (
-            "stock-pending".to_string(),
-            "stock leg has not fully filled, so the short-call leg remains gated".to_string(),
-        )
-    };
+        } else {
+            (
+                "stock-pending".to_string(),
+                "stock leg has not fully filled, so the short-call leg remains gated".to_string(),
+            )
+        };
 
     FillReconciliationRecord {
         stock_filled_shares,

@@ -172,11 +172,7 @@ impl AppConfig {
         let mode = RuntimeMode::parse(&env_var("IBKR_RUNTIME_MODE")?)?;
         let platform = BrokerPlatform::parse(&env_or_default("IBKR_PLATFORM", "gateway")?)?;
         let port = optional_env("IBKR_PORT")
-            .map(|value| {
-                value
-                    .parse()
-                    .context("IBKR_PORT must be a valid u16")
-            })
+            .map(|value| value.parse().context("IBKR_PORT must be a valid u16"))
             .transpose()?
             .unwrap_or_else(|| platform.default_port(mode));
         let client_id = env_var("IBKR_CLIENT_ID")?
@@ -400,7 +396,13 @@ mod tests {
 
     #[test]
     fn gateway_default_port_matches_mode() {
-        assert_eq!(BrokerPlatform::Gateway.default_port(RuntimeMode::Paper), 4002);
-        assert_eq!(BrokerPlatform::Gateway.default_port(RuntimeMode::Live), 4001);
+        assert_eq!(
+            BrokerPlatform::Gateway.default_port(RuntimeMode::Paper),
+            4002
+        );
+        assert_eq!(
+            BrokerPlatform::Gateway.default_port(RuntimeMode::Live),
+            4001
+        );
     }
 }
