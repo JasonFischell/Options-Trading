@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -8,12 +9,13 @@ use regex::Regex;
 use crate::{
     config::AppConfig,
     ibkr::{
-        IbkrClientDescriptor, connect, fetch_account_state, fetch_positions,
-        log_server_time, request_option_chain_for_underlying, request_option_quote,
-        request_underlying_snapshot, resolve_primary_stock_contract_id, select_buy_write_contracts,
-        switch_market_data_mode,
+        IbkrClientDescriptor, connect, fetch_account_state, fetch_positions, log_server_time,
+        request_option_chain_for_underlying, request_option_quote, request_underlying_snapshot,
+        resolve_primary_stock_contract_id, select_buy_write_contracts, switch_market_data_mode,
     },
-    models::{AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord},
+    models::{
+        AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -34,7 +36,7 @@ pub trait MarketDataProvider {
 }
 
 pub struct IbkrMarketDataProvider {
-    client: ibapi::prelude::Client,
+    client: Arc<ibapi::prelude::Client>,
     account: String,
 }
 
@@ -45,9 +47,13 @@ impl IbkrMarketDataProvider {
         log_server_time(&client).await?;
 
         Ok(Self {
-            client,
+            client: Arc::new(client),
             account: config.account.clone(),
         })
+    }
+
+    pub fn shared_client(&self) -> Arc<ibapi::prelude::Client> {
+        self.client.clone()
     }
 }
 
@@ -163,7 +169,9 @@ fn load_universe_from_csv(path: &str, config: &AppConfig) -> Result<Vec<Universe
 }
 
 fn find_header_index(headers: &StringRecord, candidates: &[&str]) -> Option<usize> {
-    headers.iter().position(|header| candidates.iter().any(|candidate| header == *candidate))
+    headers
+        .iter()
+        .position(|header| candidates.iter().any(|candidate| header == *candidate))
 }
 
 fn extract_symbol(
@@ -195,7 +203,10 @@ fn parse_optional_f64(value: Option<&str>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{
+            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
+            StrategyConfig,
+        },
         market_data::load_universe,
     };
 

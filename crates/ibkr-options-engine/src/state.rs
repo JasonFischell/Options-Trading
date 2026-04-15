@@ -43,16 +43,23 @@ pub fn build_order_intents(
     positions: &[InventoryPosition],
     candidates: &[ScoredOptionCandidate],
     config: &AppConfig,
-) -> (Vec<OrderIntent>, Vec<GuardrailRejection>, Vec<OpenPositionState>) {
+) -> (
+    Vec<OrderIntent>,
+    Vec<GuardrailRejection>,
+    Vec<OpenPositionState>,
+) {
     let open_positions = summarize_open_positions(positions);
     let mut rejections = Vec::new();
     let mut intents = Vec::new();
 
     let existing_symbols: BTreeSet<String> = open_positions
         .iter()
-        .filter(|position| position.stock_shares.abs() >= 100.0 || position.short_call_contracts > 0.0)
+        .filter(|position| {
+            position.stock_shares.abs() >= 100.0 || position.short_call_contracts > 0.0
+        })
         .map(|position| position.symbol.clone())
         .collect();
+    let mut blocked_symbols = existing_symbols.clone();
 
     let currently_open = existing_symbols.len();
     for candidate in candidates {
@@ -60,7 +67,7 @@ pub fn build_order_intents(
             break;
         }
 
-        if existing_symbols.contains(&candidate.symbol) {
+        if blocked_symbols.contains(&candidate.symbol) {
             rejections.push(GuardrailRejection {
                 symbol: candidate.symbol.clone(),
                 stage: "risk".to_string(),
@@ -119,8 +126,12 @@ pub fn build_order_intents(
             symbol: candidate.symbol.clone(),
             strategy: "buy-write covered call".to_string(),
             account: account.account.clone(),
-            mode: if config.risk.enable_paper_orders && !config.read_only {
-                "paper-ready-dry-run".to_string()
+            mode: if config.risk.enable_paper_orders
+                && !config.read_only
+                && matches!(config.mode, crate::config::RuntimeMode::Paper)
+                && !config.risk.enable_live_orders
+            {
+                "paper-stock-first".to_string()
             } else {
                 "dry-run".to_string()
             },
@@ -138,6 +149,10 @@ pub fn build_order_intents(
                     expiry: None,
                     strike: None,
                     right: None,
+                    exchange: Some("SMART".to_string()),
+                    trading_class: None,
+                    multiplier: None,
+                    currency: Some("USD".to_string()),
                 },
                 OrderLegIntent {
                     instrument_type: InstrumentType::Option,
@@ -151,10 +166,15 @@ pub fn build_order_intents(
                     limit_price: Some(candidate.option_bid),
                     expiry: Some(candidate.expiry.clone()),
                     strike: Some(candidate.strike),
-                    right: Some("C".to_string()),
+                    right: Some(candidate.right.clone()),
+                    exchange: Some(candidate.exchange.clone()),
+                    trading_class: Some(candidate.trading_class.clone()),
+                    multiplier: Some(candidate.multiplier.clone()),
+                    currency: Some("USD".to_string()),
                 },
             ],
         });
+        blocked_symbols.insert(candidate.symbol.clone());
     }
 
     (intents, rejections, open_positions)
@@ -163,7 +183,10 @@ pub fn build_order_intents(
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{
+            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
+            StrategyConfig,
+        },
         models::{AccountState, InventoryPosition, ScoredOptionCandidate},
         state::{build_order_intents, summarize_open_positions},
     };
@@ -226,6 +249,10 @@ mod tests {
             underlying_price: 100.0,
             strike: 103.0,
             expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
             days_to_expiration: 30,
             option_bid: 1.5,
             option_ask: Some(1.6),
@@ -259,5 +286,57 @@ mod tests {
         );
 
         assert_eq!(rejections.len(), 1);
+    }
+
+    #[test]
+    fn blocks_duplicate_symbols_already_selected_this_cycle() {
+        let first = ScoredOptionCandidate {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+            underlying_price: 100.0,
+            strike: 103.0,
+            expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 30,
+            option_bid: 1.5,
+            option_ask: Some(1.6),
+            delta: Some(0.25),
+            strike_buffer_pct: 0.03,
+            annualized_yield_pct: 20.0,
+            max_profit_yield_pct: 5.0,
+            score: 0.2,
+        };
+        let second = ScoredOptionCandidate {
+            strike: 104.0,
+            expiry: "20260522".to_string(),
+            option_bid: 1.3,
+            score: 0.19,
+            ..first.clone()
+        };
+
+        let (intents, rejections, _summary) = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[first, second],
+            &AppConfig {
+                risk: RiskConfig {
+                    max_new_trades_per_cycle: 2,
+                    ..RiskConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert_eq!(intents.len(), 1);
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].symbol, "AAPL");
     }
 }

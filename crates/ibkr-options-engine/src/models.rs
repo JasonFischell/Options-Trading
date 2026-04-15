@@ -99,6 +99,10 @@ pub struct ScoredOptionCandidate {
     pub underlying_price: f64,
     pub strike: f64,
     pub expiry: String,
+    pub right: String,
+    pub exchange: String,
+    pub trading_class: String,
+    pub multiplier: String,
     pub days_to_expiration: i64,
     pub option_bid: f64,
     pub option_ask: Option<f64>,
@@ -193,6 +197,10 @@ pub struct OrderLegIntent {
     pub expiry: Option<String>,
     pub strike: Option<f64>,
     pub right: Option<String>,
+    pub exchange: Option<String>,
+    pub trading_class: Option<String>,
+    pub multiplier: Option<String>,
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -215,10 +223,41 @@ pub struct GuardrailRejection {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionLegRecord {
+    pub leg_symbol: String,
+    pub instrument_type: InstrumentType,
+    pub action: TradeAction,
+    pub quantity: i32,
+    pub order_id: Option<i32>,
+    pub submission_status: String,
+    pub limit_price: Option<f64>,
+    pub filled_quantity: f64,
+    pub average_fill_price: Option<f64>,
+    pub execution_ids: Vec<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FillReconciliationRecord {
+    pub stock_filled_shares: f64,
+    pub stock_average_fill_price: Option<f64>,
+    pub short_call_filled_contracts: f64,
+    pub short_call_average_fill_price: Option<f64>,
+    pub total_commission: Option<f64>,
+    pub eligible_for_short_call: bool,
+    pub uncovered_shares: f64,
+    pub status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
     pub symbol: String,
     pub status: String,
+    pub submission_mode: String,
     pub note: String,
+    pub legs: Vec<ExecutionLegRecord>,
+    pub fill_reconciliation: Option<FillReconciliationRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

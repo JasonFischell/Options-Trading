@@ -29,7 +29,7 @@ In IB Gateway:
 4. Confirm the API port
 5. For paper Gateway, default expectation is `4002`
 6. Allow localhost connections or add `127.0.0.1` to trusted IPs if you use the trusted-IP setting
-7. Keep read-only mode enabled during early testing unless you intentionally begin paper-order submission
+7. Keep read-only mode enabled during early testing unless you intentionally begin guarded paper-order submission
 
 ## 4. Move Secrets Out Of Source Code
 
@@ -80,6 +80,7 @@ From the repository root:
 4. Run `cargo build`
 5. Run `cargo run -p ibkr-options-engine`
 6. Set `IBKR_CONNECT_ON_START=true` only when you want the app to test a real broker connection at startup
+7. Leave `ENABLE_LIVE_ORDERS=false`; guarded buy-write submission is paper-only and stock-first
 
 Recommended starting values:
 

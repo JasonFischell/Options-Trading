@@ -15,11 +15,13 @@ pub fn evaluate_buy_write_candidate(
     option: &OptionQuoteSnapshot,
     config: &StrategyConfig,
 ) -> Result<ScoredOptionCandidate, GuardrailRejection> {
-    let underlying_price = underlying.reference_price().ok_or_else(|| GuardrailRejection {
-        symbol: record.symbol.clone(),
-        stage: "strategy".to_string(),
-        reason: "missing usable underlying price".to_string(),
-    })?;
+    let underlying_price = underlying
+        .reference_price()
+        .ok_or_else(|| GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: "missing usable underlying price".to_string(),
+        })?;
 
     let premium = option.best_credit().ok_or_else(|| GuardrailRejection {
         symbol: record.symbol.clone(),
@@ -66,13 +68,12 @@ pub fn evaluate_buy_write_candidate(
         }
     }
 
-    let days_to_expiration = days_to_expiration(&option.expiry).map_err(|error| {
-        GuardrailRejection {
+    let days_to_expiration =
+        days_to_expiration(&option.expiry).map_err(|error| GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!("invalid option expiry {}: {error}", option.expiry),
-        }
-    })?;
+        })?;
 
     if days_to_expiration < config.min_expiry_days || days_to_expiration > config.max_expiry_days {
         return Err(GuardrailRejection {
@@ -109,8 +110,7 @@ pub fn evaluate_buy_write_candidate(
 
     let max_profit = (option.strike - underlying_price).max(0.0) + premium;
     let max_profit_yield_pct = (max_profit / net_debit) * 100.0;
-    let annualized_yield_pct =
-        max_profit_yield_pct / (days_to_expiration as f64 / 365.0);
+    let annualized_yield_pct = max_profit_yield_pct / (days_to_expiration as f64 / 365.0);
 
     if annualized_yield_pct < config.min_annualized_yield_pct {
         return Err(GuardrailRejection {
@@ -137,6 +137,10 @@ pub fn evaluate_buy_write_candidate(
         underlying_price,
         strike: option.strike,
         expiry: option.expiry.clone(),
+        right: option.right.clone(),
+        exchange: option.exchange.clone(),
+        trading_class: option.trading_class.clone(),
+        multiplier: option.multiplier.clone(),
         days_to_expiration,
         option_bid: premium,
         option_ask: option.ask,
@@ -251,6 +255,7 @@ mod tests {
         let candidate =
             evaluate_buy_write_candidate(&record, &underlying, &option, &config).unwrap();
         assert_eq!(candidate.symbol, "AAPL");
+        assert_eq!(candidate.exchange, "SMART");
         assert!(candidate.annualized_yield_pct > 0.0);
     }
 

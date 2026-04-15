@@ -20,8 +20,12 @@ pub struct ScanPlan {
 pub fn build_scan_plan(config: &AppConfig, symbols: &[String]) -> ScanPlan {
     let execution_mode = if config.read_only {
         "read-only"
+    } else if config.risk.enable_live_orders
+        || matches!(config.mode, crate::config::RuntimeMode::Live)
+    {
+        "live-disabled"
     } else if config.risk.enable_paper_orders {
-        "paper-dry-run"
+        "paper-stock-first"
     } else {
         "analysis-only"
     };
@@ -49,7 +53,10 @@ where
 {
     let started_at = Utc::now();
     let universe = load_universe(config)?;
-    let universe_symbols = universe.iter().map(|record| record.symbol.clone()).collect::<Vec<_>>();
+    let universe_symbols = universe
+        .iter()
+        .map(|record| record.symbol.clone())
+        .collect::<Vec<_>>();
     let _plan = build_scan_plan(config, &universe_symbols);
 
     let account = provider.load_account_state().await?;
@@ -103,7 +110,8 @@ where
     }
 
     candidates.sort_by(|left, right| {
-        right.score
+        right
+            .score
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -133,8 +141,22 @@ where
         notes: vec![
             "Scanner currently prefers delayed/frozen snapshots over long-lived subscriptions."
                 .to_string(),
-            "Buy-write execution stays in guarded dry-run mode until staged broker submission is hardened."
-                .to_string(),
+            if config.risk.enable_paper_orders
+                && matches!(config.mode, crate::config::RuntimeMode::Paper)
+                && !config.read_only
+                && !config.risk.enable_live_orders
+            {
+                "Buy-write execution submits the stock leg first in paper mode and only advances the short call after fill reconciliation."
+                    .to_string()
+            } else if config.risk.enable_live_orders
+                || matches!(config.mode, crate::config::RuntimeMode::Live)
+            {
+                "Live-order routing remains disabled; this cycle stayed on the guarded paper/dry-run path."
+                    .to_string()
+            } else {
+                "Buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
+                    .to_string()
+            },
         ],
     })
 }
@@ -147,7 +169,10 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::{
-        config::{AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig},
+        config::{
+            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
+            StrategyConfig,
+        },
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
         models::{
@@ -203,7 +228,10 @@ mod tests {
                 .map(|intent| ExecutionRecord {
                     symbol: intent.symbol.clone(),
                     status: "dry-run".to_string(),
+                    submission_mode: "dry-run".to_string(),
                     note: "recorded in test executor".to_string(),
+                    legs: Vec::new(),
+                    fill_reconciliation: None,
                 })
                 .collect())
         }

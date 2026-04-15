@@ -2,7 +2,7 @@ use anyhow::Result;
 use dotenvy::dotenv;
 use ibkr_options_engine::{
     config::AppConfig,
-    execution::GuardedDryRunExecutor,
+    execution::GuardedPaperOrderExecutor,
     market_data::{IbkrMarketDataProvider, load_universe},
     scanner::{build_scan_plan, run_scan_cycle},
 };
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
                 config.connection_guidance()
             )
         })?;
-    let executor = GuardedDryRunExecutor;
+    let executor = GuardedPaperOrderExecutor::from_client(provider.shared_client());
     let report = run_scan_cycle(&provider, &executor, &config).await?;
     println!("{}", serde_json::to_string_pretty(&report)?);
 

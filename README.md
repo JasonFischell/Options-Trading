@@ -7,7 +7,7 @@ The current vertical slice is designed around token-efficient Codex sessions:
 - scheduled batch scans instead of an always-on daemon
 - delayed or delayed-frozen snapshots before live data
 - a small watchlist first, then controlled expansion
-- guarded dry-run buy-write intent generation before broker submission
+- guarded buy-write intent generation with stock-first paper routing behind explicit flags
 - IB Gateway as the default broker runtime for unattended or semi-attended scans
 
 ## Current Architecture
@@ -19,7 +19,7 @@ The Rust crate is organized around the runtime layers we want long term:
 - `ibkr`: narrow Interactive Brokers adapter for connectivity, snapshots, positions, and chains
 - `strategy`: covered-call candidate evaluation and basic exit logic
 - `state`: portfolio summaries and buy-write order-intent guardrails
-- `execution`: guarded dry-run execution layer
+- `execution`: guarded dry-run plus paper-only stock-first submission layer
 - `scanner`: end-to-end cycle orchestration and cycle-report generation
 - `scoring`: legacy/reference scoring math carried forward for parity work
 
@@ -29,7 +29,7 @@ The engine currently supports:
 - connecting to IBKR and switching market-data modes
 - fetching account state, positions, underlying snapshots, option chains, and option quotes
 - ranking covered-call buy-write candidates with conservative liquidity filters
-- generating guarded dry-run order intents
+- generating guarded buy-write order intents with paper-order metadata
 - emitting a structured cycle report as JSON
 
 ## Development Roadmap
@@ -78,7 +78,7 @@ The engine currently supports:
 9. Run `cargo test`
 10. Run `cargo run -p ibkr-options-engine`
 
-The current execution layer is intentionally dry-run only, even if `ENABLE_PAPER_ORDERS=true`. That flag is present now so the runtime contract is stable before real order submission is introduced.
+Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first and only advances the short call after fill reconciliation confirms covered shares. Live-money routing remains disabled.
 
 ## Repository Layout
 
