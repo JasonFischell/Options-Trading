@@ -95,7 +95,12 @@ impl MarketDataProvider for IbkrMarketDataProvider {
 
         let reference_price = match underlying.reference_price() {
             Some(value) => value,
-            None => return Ok(None),
+            None => {
+                return Ok(Some(SymbolMarketSnapshot {
+                    underlying,
+                    option_quotes: Vec::new(),
+                }));
+            }
         };
 
         let contract_id = resolve_primary_stock_contract_id(&self.client, &record.symbol).await?;
@@ -148,6 +153,8 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                 delta = ?option_quote.delta,
                 implied_volatility = ?option_quote.implied_volatility,
                 underlying_price = ?option_quote.underlying_price,
+                quote_source = ?option_quote.quote_source,
+                diagnostics = ?option_quote.diagnostics,
                 "captured IBKR option snapshot"
             );
         }

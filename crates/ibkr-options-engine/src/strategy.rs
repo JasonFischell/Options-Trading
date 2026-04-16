@@ -281,6 +281,8 @@ mod tests {
             close: Some(4.15),
             implied_volatility: None,
             beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
             symbol: "NVTS".to_string(),

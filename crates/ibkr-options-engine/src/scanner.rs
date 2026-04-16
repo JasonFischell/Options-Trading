@@ -74,25 +74,39 @@ where
             guardrail_rejections.push(GuardrailRejection {
                 symbol: record.symbol.clone(),
                 stage: "market-data".to_string(),
-                reason: "no usable delayed/frozen snapshot returned".to_string(),
+                reason: "no usable market data snapshot returned".to_string(),
             });
             continue;
         };
 
         underlying_snapshots += 1;
-        if let Some(price) = snapshot.underlying.reference_price() {
-            if price < config.risk.min_underlying_price || price > config.risk.max_underlying_price
-            {
-                guardrail_rejections.push(GuardrailRejection {
-                    symbol: record.symbol.clone(),
-                    stage: "prefilter".to_string(),
-                    reason: format!(
-                        "underlying price {:.2} is outside configured range {:.2}-{:.2}",
-                        price, config.risk.min_underlying_price, config.risk.max_underlying_price
-                    ),
-                });
-                continue;
-            }
+        let Some(price) = snapshot.underlying.reference_price() else {
+            let diagnostic_suffix = if snapshot.underlying.market_data_notices.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; ibkr notices: {}",
+                    snapshot.underlying.market_data_notices.join(" | ")
+                )
+            };
+            guardrail_rejections.push(GuardrailRejection {
+                symbol: record.symbol.clone(),
+                stage: "market-data".to_string(),
+                reason: format!("missing usable underlying price{diagnostic_suffix}"),
+            });
+            continue;
+        };
+
+        if price < config.risk.min_underlying_price || price > config.risk.max_underlying_price {
+            guardrail_rejections.push(GuardrailRejection {
+                symbol: record.symbol.clone(),
+                stage: "prefilter".to_string(),
+                reason: format!(
+                    "underlying price {:.2} is outside configured range {:.2}-{:.2}",
+                    price, config.risk.min_underlying_price, config.risk.max_underlying_price
+                ),
+            });
+            continue;
         }
 
         for option_quote in snapshot.option_quotes {

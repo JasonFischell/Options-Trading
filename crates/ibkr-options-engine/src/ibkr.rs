@@ -72,7 +72,6 @@ impl SnapshotSummary {
         }
     }
 }
-}
 
 #[derive(Debug, Clone)]
 pub struct OptionChainMetadata {
@@ -360,7 +359,7 @@ pub async fn request_underlying_snapshot(
         implied_volatility: snapshot.implied_volatility,
         beta: None,
         price_source: snapshot.data_origin_label().to_string(),
-        market_data_notices: snapshot.notices,
+        market_data_notices: snapshot.diagnostics(),
     })
 }
 
@@ -612,7 +611,7 @@ pub async fn request_option_quote(
         } else {
             "default-snapshot".to_string()
         }),
-        diagnostics: snapshot.notices,
+        diagnostics: snapshot.diagnostics(),
     })
 }
 
@@ -650,6 +649,15 @@ fn merge_snapshot_summary(primary: &mut SnapshotSummary, fallback: SnapshotSumma
         primary.underlying_price = fallback.underlying_price;
     }
     primary.notices.extend(fallback.notices);
+    for tick_type in fallback.observed_tick_types {
+        if !primary
+            .observed_tick_types
+            .iter()
+            .any(|existing| existing == &tick_type)
+        {
+            primary.observed_tick_types.push(tick_type);
+        }
+    }
 }
 
 fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickType, price: f64) {
@@ -675,6 +683,23 @@ fn record_tick_type(summary: &mut SnapshotSummary, tick_type: &TickType) {
 
 fn update_snapshot_from_price_size(summary: &mut SnapshotSummary, tick: &TickPriceSize) {
     update_snapshot_from_price(summary, &tick.price_tick_type, tick.price);
+}
+
+impl SnapshotSummary {
+    fn diagnostics(&self) -> Vec<String> {
+        let mut diagnostics = self.notices.clone();
+
+        if !self.observed_tick_types.is_empty() {
+            diagnostics.push(format!(
+                "observed tick types: {}",
+                self.observed_tick_types.join(", ")
+            ));
+        }
+
+        diagnostics.push(format!("observed data origin: {}", self.data_origin_label()));
+
+        diagnostics
+    }
 }
 
 pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
