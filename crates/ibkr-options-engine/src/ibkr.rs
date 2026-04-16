@@ -6,6 +6,7 @@ use ibapi::market_data::MarketDataType;
 use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
 use ibapi::prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol};
 use tokio::time::{Duration, timeout};
+use tracing::info;
 
 use crate::{
     config::{AppConfig, MarketDataMode},
@@ -52,6 +53,24 @@ pub struct SnapshotSummary {
     pub implied_volatility: Option<f64>,
     pub delta: Option<f64>,
     pub underlying_price: Option<f64>,
+    pub observed_tick_types: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+impl SnapshotSummary {
+    pub fn data_origin_label(&self) -> &'static str {
+        if self
+            .observed_tick_types
+            .iter()
+            .any(|tick_type| tick_type.starts_with("Delayed"))
+        {
+            "delayed-or-delayed-frozen"
+        } else if self.observed_tick_types.is_empty() {
+            "unknown"
+        } else {
+            "realtime-or-frozen"
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +261,7 @@ pub async fn switch_market_data_mode(client: &Client, mode: MarketDataMode) -> R
         .switch_market_data_type(ibkr_mode)
         .await
         .context("failed to switch IBKR market data mode")?;
+    info!(requested_mode = %market_data_mode_label(mode), "requested IBKR market data mode");
     Ok(())
 }
 
@@ -277,9 +297,11 @@ pub async fn request_snapshot(
             .with_context(|| format!("error while receiving market data snapshot for {label}"))?
         {
             TickTypes::Price(price) => {
+                record_tick_type(&mut summary, &price.tick_type);
                 update_snapshot_from_price(&mut summary, &price.tick_type, price.price)
             }
             TickTypes::PriceSize(price_size) => {
+                record_tick_type(&mut summary, &price_size.price_tick_type);
                 update_snapshot_from_price_size(&mut summary, &price_size)
             }
             TickTypes::OptionComputation(computation) => {
@@ -297,7 +319,9 @@ pub async fn request_snapshot(
                 }
             }
             TickTypes::Notice(notice) => {
-                let _ = (notice.code, notice.message);
+                summary
+                    .notices
+                    .push(format!("{}: {}", notice.code, notice.message));
             }
             TickTypes::SnapshotEnd => break,
             _ => {}
@@ -334,6 +358,8 @@ pub async fn request_underlying_snapshot(
         close: snapshot.close,
         implied_volatility: snapshot.implied_volatility,
         beta: None,
+        price_source: snapshot.data_origin_label().to_string(),
+        market_data_notices: snapshot.notices,
     })
 }
 
@@ -345,9 +371,13 @@ pub fn select_buy_write_contracts(
 ) -> Result<Vec<SelectedOptionContract>> {
     let min_strike = reference_price * (1.0 + config.strategy.min_strike_buffer_pct);
     let mut candidates: Vec<SelectedOptionContract> = Vec::new();
+    let mut total_expirations = 0usize;
+    let mut expirations_in_window = 0usize;
+    let mut strikes_in_window = 0usize;
 
     for chain in chains {
         for expiration in &chain.expirations {
+            total_expirations += 1;
             let expiry_date = match parse_expiry_date(expiration) {
                 Ok(value) => value,
                 Err(_) => continue,
@@ -358,6 +388,7 @@ pub fn select_buy_write_contracts(
             {
                 continue;
             }
+            expirations_in_window += 1;
 
             let mut strikes = chain
                 .strikes
@@ -365,6 +396,7 @@ pub fn select_buy_write_contracts(
                 .copied()
                 .filter(|strike| *strike >= min_strike)
                 .collect::<Vec<_>>();
+            strikes_in_window += strikes.len();
             strikes.sort_by(|left, right| {
                 left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -419,7 +451,13 @@ pub fn select_buy_write_contracts(
     candidates.truncate(config.risk.max_option_quotes_per_underlying);
 
     if candidates.is_empty() {
-        anyhow::bail!("no buy-write option contracts matched for {symbol}");
+        anyhow::bail!(
+            "no buy-write option contracts matched for {symbol}; reference_price={reference_price:.2}, min_strike={min_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_at_or_above_min={}",
+            chains.len(),
+            total_expirations,
+            expirations_in_window,
+            strikes_in_window
+        );
     }
 
     Ok(candidates)
@@ -568,8 +606,28 @@ fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickTyp
     }
 }
 
+fn record_tick_type(summary: &mut SnapshotSummary, tick_type: &TickType) {
+    let tick_type = format!("{tick_type:?}");
+    if !summary
+        .observed_tick_types
+        .iter()
+        .any(|existing| existing == &tick_type)
+    {
+        summary.observed_tick_types.push(tick_type);
+    }
+}
+
 fn update_snapshot_from_price_size(summary: &mut SnapshotSummary, tick: &TickPriceSize) {
     update_snapshot_from_price(summary, &tick.price_tick_type, tick.price);
+}
+
+pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
+    match mode {
+        MarketDataMode::Live => "live",
+        MarketDataMode::Frozen => "frozen",
+        MarketDataMode::Delayed => "delayed",
+        MarketDataMode::DelayedFrozen => "delayed-frozen",
+    }
 }
 
 #[cfg(test)]

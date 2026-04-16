@@ -17,6 +17,8 @@ pub struct UnderlyingSnapshot {
     pub close: Option<f64>,
     pub implied_volatility: Option<f64>,
     pub beta: Option<f64>,
+    pub price_source: String,
+    pub market_data_notices: Vec<String>,
 }
 
 impl UnderlyingSnapshot {

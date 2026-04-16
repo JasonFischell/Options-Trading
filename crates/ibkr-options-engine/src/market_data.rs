@@ -6,13 +6,14 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use csv::StringRecord;
 use regex::Regex;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     config::AppConfig,
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
         fetch_positions, is_invalid_option_contract_error, log_server_time,
+        market_data_mode_label,
         request_option_chain_for_underlying, request_option_quote, request_underlying_snapshot,
         resolve_primary_stock_contract_id, select_buy_write_contracts, switch_market_data_mode,
     },
@@ -79,6 +80,19 @@ impl MarketDataProvider for IbkrMarketDataProvider {
         let mut underlying = request_underlying_snapshot(&self.client, &record.symbol).await?;
         underlying.beta = Some(record.beta);
 
+        info!(
+            symbol = %record.symbol,
+            requested_market_data_mode = %market_data_mode_label(config.market_data_mode),
+            observed_data_origin = %underlying.price_source,
+            underlying_bid = ?underlying.bid,
+            underlying_ask = ?underlying.ask,
+            underlying_last = ?underlying.last,
+            underlying_close = ?underlying.close,
+            underlying_reference_price = ?underlying.reference_price(),
+            underlying_notices = ?underlying.market_data_notices,
+            "captured IBKR underlying snapshot"
+        );
+
         let reference_price = match underlying.reference_price() {
             Some(value) => value,
             None => return Ok(None),
@@ -87,12 +101,56 @@ impl MarketDataProvider for IbkrMarketDataProvider {
         let contract_id = resolve_primary_stock_contract_id(&self.client, &record.symbol).await?;
         let chains =
             request_option_chain_for_underlying(&self.client, &record.symbol, contract_id).await?;
-        let selected_contracts =
-            select_buy_write_contracts(&record.symbol, &chains, reference_price, config)?;
+        info!(
+            symbol = %record.symbol,
+            underlying_contract_id = contract_id,
+            chain_response_count = chains.len(),
+            expiration_count = chains.iter().map(|chain| chain.expirations.len()).sum::<usize>(),
+            strike_count = chains.iter().map(|chain| chain.strikes.len()).sum::<usize>(),
+            "received IBKR option chain metadata"
+        );
+        let selected_contracts = match select_buy_write_contracts(
+            &record.symbol,
+            &chains,
+            reference_price,
+            config,
+        ) {
+            Ok(selected_contracts) => selected_contracts,
+            Err(error) => {
+                warn!(
+                    symbol = %record.symbol,
+                    reference_price,
+                    requested_market_data_mode = %market_data_mode_label(config.market_data_mode),
+                    error = %error,
+                    "unable to select buy-write option contracts from IBKR chain"
+                );
+                return Ok(Some(SymbolMarketSnapshot {
+                    underlying,
+                    option_quotes: Vec::new(),
+                }));
+            }
+        };
         let option_quotes = fetch_option_quotes_with(&selected_contracts, |selected| {
             request_option_quote(&self.client, selected)
         })
         .await?;
+
+        for option_quote in &option_quotes {
+            info!(
+                symbol = %option_quote.symbol,
+                expiry = %option_quote.expiry,
+                strike = option_quote.strike,
+                right = %option_quote.right,
+                bid = ?option_quote.bid,
+                ask = ?option_quote.ask,
+                last = ?option_quote.last,
+                close = ?option_quote.close,
+                delta = ?option_quote.delta,
+                implied_volatility = ?option_quote.implied_volatility,
+                underlying_price = ?option_quote.underlying_price,
+                "captured IBKR option snapshot"
+            );
+        }
 
         Ok(Some(SymbolMarketSnapshot {
             underlying,

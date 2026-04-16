@@ -80,6 +80,8 @@ mod tests {
             close: None,
             implied_volatility: None,
             beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
         };
 
         let candidate = score_option(
@@ -111,6 +113,8 @@ mod tests {
             close: None,
             implied_volatility: None,
             beta: Some(1.0),
+            price_source: "unknown".to_string(),
+            market_data_notices: Vec::new(),
         };
 
         let candidate = score_option(
