@@ -134,8 +134,8 @@ pub struct RiskConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            min_underlying_price: 5.0,
-            max_underlying_price: 250.0,
+            min_underlying_price: 1.0,
+            max_underlying_price: 20.0,
             max_underlyings_per_cycle: 50,
             max_option_quotes_per_underlying: 3,
             max_new_trades_per_cycle: 1,

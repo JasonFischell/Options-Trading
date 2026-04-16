@@ -383,6 +383,8 @@ mod tests {
                 implied_volatility: Some(0.22),
                 delta: Some(0.28),
                 underlying_price: Some(100.0),
+                quote_source: Some("test".to_string()),
+                diagnostics: Vec::new(),
             })
         })
         .await

@@ -104,7 +104,18 @@ where
                 &config.strategy,
             ) {
                 Ok(candidate) => candidates.push(candidate),
-                Err(rejection) => guardrail_rejections.push(rejection),
+                Err(mut rejection) => {
+                    if rejection.reason.contains("missing usable option premium")
+                        && !option_quote.diagnostics.is_empty()
+                    {
+                        rejection.reason = format!(
+                            "{}; ibkr notices: {}",
+                            rejection.reason,
+                            option_quote.diagnostics.join(" | ")
+                        );
+                    }
+                    guardrail_rejections.push(rejection);
+                }
             }
         }
     }
@@ -258,7 +269,11 @@ mod tests {
                 min_annualized_yield_pct: 0.01,
                 ..StrategyConfig::default()
             },
-            risk: RiskConfig::default(),
+            risk: RiskConfig {
+                min_underlying_price: 1.0,
+                max_underlying_price: 250.0,
+                ..RiskConfig::default()
+            },
         }
     }
 
@@ -296,6 +311,8 @@ mod tests {
                     implied_volatility: Some(0.2),
                     delta: Some(0.25),
                     underlying_price: Some(100.0),
+                    quote_source: Some("test".to_string()),
+                    diagnostics: Vec::new(),
                 }],
             },
         );

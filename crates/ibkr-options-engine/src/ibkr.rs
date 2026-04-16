@@ -72,6 +72,7 @@ impl SnapshotSummary {
         }
     }
 }
+}
 
 #[derive(Debug, Clone)]
 pub struct OptionChainMetadata {
@@ -575,7 +576,20 @@ pub async fn request_option_quote(
         "{} {} {} {}",
         selected.symbol, selected.expiration, selected.right, selected.strike
     );
-    let snapshot = request_snapshot(client, &option_contract, &[], &option_label).await?;
+    let mut snapshot = request_snapshot(client, &option_contract, &[], &option_label).await?;
+    let used_model_fallback = if option_snapshot_has_usable_premium(&snapshot) {
+        false
+    } else {
+        let fallback = request_snapshot(
+            client,
+            &option_contract,
+            &["106"],
+            &format!("{option_label} model"),
+        )
+        .await?;
+        merge_snapshot_summary(&mut snapshot, fallback);
+        true
+    };
 
     Ok(OptionQuoteSnapshot {
         symbol: option_contract.symbol.to_string(),
@@ -593,7 +607,49 @@ pub async fn request_option_quote(
         implied_volatility: snapshot.implied_volatility,
         delta: snapshot.delta,
         underlying_price: snapshot.underlying_price,
+        quote_source: Some(if used_model_fallback {
+            "default+model-fallback".to_string()
+        } else {
+            "default-snapshot".to_string()
+        }),
+        diagnostics: snapshot.notices,
     })
+}
+
+fn option_snapshot_has_usable_premium(snapshot: &SnapshotSummary) -> bool {
+    snapshot.bid.is_some()
+        || snapshot.option_price.is_some()
+        || matches!((snapshot.bid, snapshot.ask), (Some(_), Some(_)))
+        || snapshot.last.is_some()
+        || snapshot.close.is_some()
+}
+
+fn merge_snapshot_summary(primary: &mut SnapshotSummary, fallback: SnapshotSummary) {
+    if primary.bid.is_none() {
+        primary.bid = fallback.bid;
+    }
+    if primary.ask.is_none() {
+        primary.ask = fallback.ask;
+    }
+    if primary.last.is_none() {
+        primary.last = fallback.last;
+    }
+    if primary.close.is_none() {
+        primary.close = fallback.close;
+    }
+    if primary.option_price.is_none() {
+        primary.option_price = fallback.option_price;
+    }
+    if primary.implied_volatility.is_none() {
+        primary.implied_volatility = fallback.implied_volatility;
+    }
+    if primary.delta.is_none() {
+        primary.delta = fallback.delta;
+    }
+    if primary.underlying_price.is_none() {
+        primary.underlying_price = fallback.underlying_price;
+    }
+    primary.notices.extend(fallback.notices);
 }
 
 fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickType, price: f64) {
@@ -632,7 +688,9 @@ pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptionChainSummary, select_buy_write_contracts};
+    use super::{
+        OptionChainSummary, SnapshotSummary, merge_snapshot_summary, select_buy_write_contracts,
+    };
     use crate::config::{
         AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
     };
@@ -732,5 +790,29 @@ mod tests {
         assert_eq!(selected[0].chain_metadata.len(), 2);
         assert_eq!(selected[0].chain_metadata[0].exchange, "SMART");
         assert_eq!(selected[0].chain_metadata[1].exchange, "CBOE");
+    }
+
+    #[test]
+    fn merges_fallback_snapshot_fields_without_clobbering_primary_values() {
+        let mut primary = SnapshotSummary {
+            bid: Some(0.1),
+            ask: None,
+            option_price: None,
+            notices: vec!["primary".to_string()],
+            ..SnapshotSummary::default()
+        };
+        let fallback = SnapshotSummary {
+            ask: Some(0.2),
+            option_price: Some(0.15),
+            notices: vec!["fallback".to_string()],
+            ..SnapshotSummary::default()
+        };
+
+        merge_snapshot_summary(&mut primary, fallback);
+
+        assert_eq!(primary.bid, Some(0.1));
+        assert_eq!(primary.ask, Some(0.2));
+        assert_eq!(primary.option_price, Some(0.15));
+        assert_eq!(primary.notices, vec!["primary", "fallback"]);
     }
 }

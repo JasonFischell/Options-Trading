@@ -50,6 +50,8 @@ Suggested variables:
 - `IBKR_READ_ONLY`
 - `IBKR_SYMBOLS`
 - `IBKR_CONNECT_ON_START`
+- `MIN_UNDERLYING_PRICE`
+- `MAX_UNDERLYING_PRICE`
 
 ## 5. Validate The Current Python Baseline
 
@@ -88,3 +90,6 @@ Recommended starting values:
 - `IBKR_PORT=4002`
 - `IBKR_RUNTIME_MODE=paper`
 - `IBKR_READ_ONLY=true`
+- `IBKR_SYMBOLS=APPS,BTBT,DAWN,PTON,BB,NVTS`
+- `MIN_UNDERLYING_PRICE=1`
+- `MAX_UNDERLYING_PRICE=20`

@@ -55,6 +55,8 @@ pub struct OptionQuoteSnapshot {
     pub implied_volatility: Option<f64>,
     pub delta: Option<f64>,
     pub underlying_price: Option<f64>,
+    pub quote_source: Option<String>,
+    pub diagnostics: Vec<String>,
 }
 
 impl OptionQuoteSnapshot {
@@ -71,6 +73,38 @@ impl OptionQuoteSnapshot {
             .or(self.midpoint())
             .or(self.last)
             .or(self.close)
+    }
+
+    pub fn has_usable_premium(&self) -> bool {
+        self.best_credit().is_some()
+    }
+
+    pub fn missing_premium_diagnostic(&self) -> String {
+        let available_fields = [
+            ("bid", self.bid),
+            ("ask", self.ask),
+            ("last", self.last),
+            ("close", self.close),
+            ("option_price", self.option_price),
+            ("delta", self.delta),
+            ("underlying_price", self.underlying_price),
+        ]
+        .into_iter()
+        .filter_map(|(label, value)| value.map(|_| label))
+        .collect::<Vec<_>>();
+
+        let source = self.quote_source.as_deref().unwrap_or("snapshot");
+        if available_fields.is_empty() {
+            format!(
+                "no bid/ask/last/close/model fields returned from {source} for {} {} {} {}",
+                self.symbol, self.expiry, self.right, self.strike
+            )
+        } else {
+            format!(
+                "missing premium fields from {source}; available fields: {}",
+                available_fields.join(", ")
+            )
+        }
     }
 
     pub fn spread_pct(&self) -> Option<f64> {

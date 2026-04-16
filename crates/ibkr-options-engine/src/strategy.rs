@@ -26,7 +26,10 @@ pub fn evaluate_buy_write_candidate(
     let premium = option.best_credit().ok_or_else(|| GuardrailRejection {
         symbol: record.symbol.clone(),
         stage: "strategy".to_string(),
-        reason: "missing usable option premium".to_string(),
+        reason: format!(
+            "missing usable option premium ({})",
+            option.missing_premium_diagnostic()
+        ),
     })?;
 
     if premium < config.min_option_bid {
@@ -246,6 +249,8 @@ mod tests {
             implied_volatility: Some(0.25),
             delta: Some(0.25),
             underlying_price: Some(100.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
         };
         let config = StrategyConfig {
             min_expiry_days: 1,
@@ -259,6 +264,54 @@ mod tests {
         assert_eq!(candidate.symbol, "AAPL");
         assert_eq!(candidate.exchange, "SMART");
         assert!(candidate.annualized_yield_pct > 0.0);
+    }
+
+    #[test]
+    fn reports_detailed_missing_premium_reason_for_thin_snapshots() {
+        let record = UniverseRecord {
+            symbol: "NVTS".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "NVTS".to_string(),
+            price: 4.2,
+            bid: Some(4.1),
+            ask: Some(4.3),
+            last: None,
+            close: Some(4.15),
+            implied_volatility: None,
+            beta: Some(1.1),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "NVTS".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 4.5,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "NVTS".to_string(),
+            multiplier: "100".to_string(),
+            bid: None,
+            ask: None,
+            last: None,
+            close: None,
+            option_price: None,
+            implied_volatility: Some(0.45),
+            delta: Some(0.20),
+            underlying_price: Some(4.2),
+            quote_source: Some("default-snapshot".to_string()),
+            diagnostics: vec!["354: Not subscribed to requested market data".to_string()],
+        };
+
+        let rejection =
+            evaluate_buy_write_candidate(&record, &underlying, &option, &StrategyConfig::default())
+                .unwrap_err();
+
+        assert!(rejection.reason.contains("missing usable option premium"));
+        assert!(
+            rejection
+                .reason
+                .contains("available fields: delta, underlying_price")
+        );
     }
 
     #[test]
