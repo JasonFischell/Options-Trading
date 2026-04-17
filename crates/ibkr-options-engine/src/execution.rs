@@ -351,10 +351,7 @@ where
 }
 
 fn paper_submission_enabled(config: &AppConfig) -> bool {
-    config.risk.enable_paper_orders
-        && matches!(config.mode, RuntimeMode::Paper)
-        && !config.read_only
-        && !config.risk.enable_live_orders
+    config.guarded_paper_submission_enabled()
 }
 
 fn dry_run_note(config: &AppConfig) -> String {

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_UNIVERSE_FILE: &str = "docs/50_stocks_list.csv";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -97,9 +100,11 @@ impl MarketDataMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrategyConfig {
     pub default_beta: f64,
+    pub target_expiry: Option<String>,
     pub min_expiry_days: i64,
     pub max_expiry_days: i64,
     pub min_annualized_yield_pct: f64,
+    pub min_expiration_yield_pct: f64,
     pub min_expiration_profit_per_share: f64,
     pub min_itm_depth_pct: f64,
     pub max_itm_depth_pct: f64,
@@ -112,9 +117,11 @@ impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
             default_beta: 1.5,
+            target_expiry: None,
             min_expiry_days: 30,
             max_expiry_days: 60,
             min_annualized_yield_pct: 12.0,
+            min_expiration_yield_pct: 1.0,
             min_expiration_profit_per_share: 0.05,
             min_itm_depth_pct: 0.0,
             max_itm_depth_pct: 0.50,
@@ -194,11 +201,22 @@ impl AppConfig {
         let market_data_mode = MarketDataMode::parse(&env_or_default("MARKET_DATA_MODE", "live")?)?;
         let raw_universe_file = raw_optional_env("UNIVERSE_FILE");
         let raw_symbols = raw_optional_env("IBKR_SYMBOLS");
-        let universe_file = normalize_optional_env(raw_universe_file.as_deref());
+        let explicit_universe_file = normalize_optional_env(raw_universe_file.as_deref());
+        let universe_file = if raw_universe_file
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            None
+        } else {
+            explicit_universe_file
+                .clone()
+                .or_else(|| Some(DEFAULT_UNIVERSE_FILE.to_string()))
+        };
         let symbols = raw_symbols
             .as_deref()
             .map(parse_symbols)
             .unwrap_or_default();
+        let target_expiry = normalize_expiry_env("TARGET_EXPIRY")?;
         let mut startup_warnings = Vec::new();
 
         if raw_universe_file
@@ -219,10 +237,12 @@ impl AppConfig {
                     .to_string(),
             );
         }
-        if !symbols.is_empty() && universe_file.is_some() {
+        if !symbols.is_empty() && explicit_universe_file.is_some() {
             startup_warnings.push(format!(
                 "Both IBKR_SYMBOLS and UNIVERSE_FILE were set; IBKR_SYMBOLS will override {} for this run.",
-                universe_file.as_deref().unwrap_or("the configured CSV universe")
+                explicit_universe_file
+                    .as_deref()
+                    .unwrap_or("the configured CSV universe")
             ));
         }
 
@@ -254,6 +274,7 @@ impl AppConfig {
                 default_beta: env_or_default("DEFAULT_BETA", &defaults.default_beta.to_string())?
                     .parse()
                     .context("DEFAULT_BETA must be numeric")?,
+                target_expiry,
                 min_expiry_days: env_or_default(
                     "MIN_EXPIRY_DAYS",
                     &defaults.min_expiry_days.to_string(),
@@ -272,6 +293,12 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MIN_ANNUALIZED_YIELD_PCT must be numeric")?,
+                min_expiration_yield_pct: env_or_default(
+                    "MIN_EXPIRATION_YIELD_PCT",
+                    &defaults.min_expiration_yield_pct.to_string(),
+                )?
+                .parse()
+                .context("MIN_EXPIRATION_YIELD_PCT must be numeric")?,
                 min_expiration_profit_per_share: env_or_default(
                     "MIN_EXPIRATION_PROFIT_PER_SHARE",
                     &defaults.min_expiration_profit_per_share.to_string(),
@@ -385,6 +412,16 @@ impl AppConfig {
             "disabled".to_string()
         }
     }
+
+    pub fn guarded_paper_submission_requested(&self) -> bool {
+        self.risk.enable_paper_orders
+            && matches!(self.mode, RuntimeMode::Paper)
+            && !self.risk.enable_live_orders
+    }
+
+    pub fn guarded_paper_submission_enabled(&self) -> bool {
+        self.guarded_paper_submission_requested() && !self.read_only
+    }
 }
 
 fn env_var(key: &str) -> Result<String> {
@@ -409,6 +446,22 @@ fn normalize_optional_env(value: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_expiry_env(key: &str) -> Result<Option<String>> {
+    let Some(value) = raw_optional_env(key) else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let parsed = NaiveDate::parse_from_str(trimmed, "%Y%m%d")
+        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
+        .with_context(|| format!("{key} must use YYYYMMDD or YYYY-MM-DD"))?;
+
+    Ok(Some(parsed.format("%Y%m%d").to_string()))
+}
+
 pub fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -428,7 +481,10 @@ pub fn parse_symbols(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrokerPlatform, MarketDataMode, RunMode, RuntimeMode, parse_bool, parse_symbols};
+    use super::{
+        BrokerPlatform, MarketDataMode, RunMode, RuntimeMode, normalize_expiry_env, parse_bool,
+        parse_symbols,
+    };
 
     #[test]
     fn parses_bool_flags() {
@@ -467,5 +523,19 @@ mod tests {
             BrokerPlatform::Gateway.default_port(RuntimeMode::Live),
             4001
         );
+    }
+
+    #[test]
+    fn normalizes_target_expiry_values() {
+        unsafe {
+            std::env::set_var("TARGET_EXPIRY", "2026-04-24");
+        }
+
+        let expiry = normalize_expiry_env("TARGET_EXPIRY").unwrap();
+        assert_eq!(expiry.as_deref(), Some("20260424"));
+
+        unsafe {
+            std::env::remove_var("TARGET_EXPIRY");
+        }
     }
 }

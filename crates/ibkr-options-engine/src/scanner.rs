@@ -86,12 +86,22 @@ where
         },
         config.platform.label()
     )];
+    action_log.push(format!(
+        "Account summary for {}: buying_power={:?}, available_funds={:?}, net_liquidation={:?}.",
+        account.account, account.buying_power, account.available_funds, account.net_liquidation
+    ));
 
     if !config.prefers_live_market_data() {
         warnings.push(format!(
             "Configured market data mode is {} instead of live; switch MARKET_DATA_MODE=live before relying on this scan for paper-trading decisions.",
             crate::ibkr::market_data_mode_label(config.market_data_mode)
         ));
+    }
+    if config.guarded_paper_submission_enabled() && account.buying_power.is_none() {
+        warnings.push(
+            "IBKR account summary did not return BUYING_POWER for the configured paper account; guarded paper routing will stay blocked."
+                .to_string(),
+        );
     }
 
     for record in &universe {
@@ -224,11 +234,7 @@ where
     guardrail_rejections.extend(risk_rejections);
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
 
-    if config.risk.enable_paper_orders
-        && matches!(config.mode, crate::config::RuntimeMode::Paper)
-        && !config.read_only
-        && !config.risk.enable_live_orders
-    {
+    if config.guarded_paper_submission_enabled() {
         let blocked_symbols = proposed_orders
             .iter()
             .filter(|intent| non_live_symbols.contains(&intent.symbol))
@@ -274,10 +280,7 @@ where
         &mut action_log,
     );
 
-    if config.risk.enable_paper_orders
-        && matches!(config.mode, crate::config::RuntimeMode::Paper)
-        && !config.read_only
-        && !config.risk.enable_live_orders
+    if config.guarded_paper_submission_enabled()
         && execution_records
             .iter()
             .any(|record| record.submission_mode == "paper" && record.symbol != "N/A")
@@ -313,6 +316,7 @@ where
         run_mode: format!("{:?}", config.run_mode),
         schedule: config.scan_schedule.clone(),
         market_data_mode: format!("{:?}", config.market_data_mode),
+        account_state: account.clone(),
         universe_size: universe.len(),
         symbols_scanned,
         underlying_snapshots,
@@ -332,11 +336,7 @@ where
             "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits."
                 .to_string(),
             "IB Gateway remains the default broker platform; switch to TWS by setting IBKR_PLATFORM=tws and letting the platform-specific default port follow unless you intentionally override IBKR_PORT.".to_string(),
-            if config.risk.enable_paper_orders
-                && matches!(config.mode, crate::config::RuntimeMode::Paper)
-                && !config.read_only
-                && !config.risk.enable_live_orders
-            {
+            if config.guarded_paper_submission_enabled() {
                 "Deep-ITM covered-call buy-write execution submits the stock leg first in paper mode, persists idempotency state on disk, and only advances the short call after fill reconciliation."
                     .to_string()
             } else if config.risk.enable_live_orders

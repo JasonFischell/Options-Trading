@@ -56,6 +56,12 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             report.live_data_requested
         ),
         format!(
+            "Account summary: buying_power={:?}, available_funds={:?}, net_liquidation={:?}",
+            report.account_state.buying_power,
+            report.account_state.available_funds,
+            report.account_state.net_liquidation
+        ),
+        format!(
             "Universe: {} scanned, {} underlying snapshots, {} option quotes",
             report.symbols_scanned, report.underlying_snapshots, report.option_quotes_considered
         ),

@@ -9,7 +9,7 @@ The current vertical slice is designed around token-efficient Codex sessions:
 - a small watchlist first, then controlled expansion
 - guarded deep-ITM covered-call buy-write intent generation with stock-first paper routing behind explicit flags
 - IB Gateway as the default broker runtime for unattended or semi-attended scans
-- a starter universe constrained to `APPS,BTBT,DAWN,PTON,BB,NVTS` with a default `$1-$20` underlying filter
+- a default 50-symbol universe loaded from `docs/50_stocks_list.csv` with a `$1-$20` underlying filter
 
 ## Current Architecture
 
@@ -73,7 +73,7 @@ The engine currently supports:
 1. Copy `.env.example` to `.env`
 2. Keep `IBKR_PLATFORM=gateway` unless you intentionally want TWS
 3. For paper Gateway, use `IBKR_PORT=4002` unless your Gateway settings show a different API port
-4. Point `UNIVERSE_FILE` to `docs/starter_watchlist.csv` or set `IBKR_SYMBOLS`
+4. Leave `UNIVERSE_FILE=docs/50_stocks_list.csv` unless you intentionally want a different CSV universe
 5. Keep `MIN_UNDERLYING_PRICE=1` and `MAX_UNDERLYING_PRICE=20` for the current sub-$20 watchlist
 6. Keep `IBKR_READ_ONLY=true` and `ENABLE_PAPER_ORDERS=false` for early testing
 7. Set `IBKR_CONNECT_ON_START=true` only when IB Gateway or TWS paper is running
@@ -82,9 +82,9 @@ The engine currently supports:
 10. Run `cargo test`
 11. Run `cargo run -p ibkr-options-engine`
 
-The current screening defaults mirror the Python reference more closely for deep-ITM calls: `MIN_EXPIRY_DAYS=30`, `MAX_EXPIRY_DAYS=60`, `MIN_ITM_DEPTH_PCT=0.05`, `MIN_DOWNSIDE_BUFFER_PCT=0.12`, and `MIN_ANNUALIZED_YIELD_PCT=12`. Ranking now increases with both annualized return and ITM depth, while still scaling down higher-beta names.
+The current screening defaults mirror the Python reference more closely for deep-ITM calls, with an exact-expiry override available when needed: `TARGET_EXPIRY=20260424`, `MIN_EXPIRY_DAYS=30`, `MAX_EXPIRY_DAYS=60`, `MIN_ITM_DEPTH_PCT=0.05`, `MIN_DOWNSIDE_BUFFER_PCT=0.12`, `MIN_EXPIRATION_YIELD_PCT=1.0`, and `MIN_ANNUALIZED_YIELD_PCT=12`. When `TARGET_EXPIRY` is set, the scanner uses that exact expiration even if it falls outside the default day window. Ranking still increases with both annualized return and ITM depth, while scaling down higher-beta names.
 
-Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, refreshes open positions after broker activity, and only advances the short call after fill reconciliation confirms covered shares. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
+Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, `MARKET_DATA_MODE=live`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, refuses to route symbols that relied on delayed/frozen data, requires `BUYING_POWER` to be present on the IBKR paper account summary, refreshes open positions after broker activity, and only advances the short call after fill reconciliation confirms covered shares. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
 
 For thin delayed/frozen option markets, the scanner now retries one model-price snapshot before rejecting a contract as missing premium and includes IBKR notices plus the fields that were actually returned. This is especially useful for off-hours troubleshooting on `NVTS`, `PTON`, and `BB`, where delayed/frozen data often returns greeks or underlying marks without a usable bid/last/close on the option itself.
 

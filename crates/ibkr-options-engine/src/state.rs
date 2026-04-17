@@ -91,7 +91,11 @@ pub fn build_order_intents(
         let estimated_stock_cost = candidate.underlying_price * 100.0;
         let required_buying_power =
             estimated_stock_cost * (1.0 + config.risk.min_buying_power_buffer_pct / 100.0);
-        let buying_power = account.buying_power.or(account.available_funds);
+        let buying_power = if config.guarded_paper_submission_enabled() {
+            account.buying_power
+        } else {
+            account.buying_power.or(account.available_funds)
+        };
 
         match buying_power {
             Some(value) if value >= required_buying_power => {}
@@ -110,7 +114,12 @@ pub fn build_order_intents(
                 rejections.push(GuardrailRejection {
                     symbol: candidate.symbol.clone(),
                     stage: "risk".to_string(),
-                    reason: "missing buying power or available funds from IBKR".to_string(),
+                    reason: if config.guarded_paper_submission_enabled() {
+                        "guarded paper routing requires IBKR BUYING_POWER for the configured paper account"
+                            .to_string()
+                    } else {
+                        "missing buying power or available funds from IBKR".to_string()
+                    },
                 });
                 continue;
             }
@@ -124,11 +133,7 @@ pub fn build_order_intents(
             symbol: candidate.symbol.clone(),
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: account.account.clone(),
-            mode: if config.risk.enable_paper_orders
-                && !config.read_only
-                && matches!(config.mode, crate::config::RuntimeMode::Paper)
-                && !config.risk.enable_live_orders
-            {
+            mode: if config.guarded_paper_submission_enabled() {
                 "paper-stock-first".to_string()
             } else {
                 "dry-run".to_string()
@@ -341,5 +346,55 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert_eq!(rejections.len(), 1);
         assert_eq!(rejections[0].symbol, "AAPL");
+    }
+
+    #[test]
+    fn guarded_paper_mode_requires_buying_power_field() {
+        let candidate = ScoredOptionCandidate {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+            underlying_price: 100.0,
+            strike: 103.0,
+            expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 30,
+            option_bid: 1.5,
+            option_ask: Some(1.6),
+            delta: Some(0.25),
+            itm_depth_pct: 0.03,
+            downside_buffer_pct: 0.15,
+            expiration_profit_per_share: 5.0,
+            annualized_yield_pct: 20.0,
+            expiration_yield_pct: 5.0,
+            score: 0.2,
+        };
+
+        let (_intents, rejections, _summary) = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: None,
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[candidate],
+            &AppConfig {
+                read_only: false,
+                risk: RiskConfig {
+                    enable_paper_orders: true,
+                    ..RiskConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert!(
+            rejections
+                .iter()
+                .any(|rejection| { rejection.reason.contains("requires IBKR BUYING_POWER") })
+        );
     }
 }

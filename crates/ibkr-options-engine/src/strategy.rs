@@ -65,14 +65,35 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    let days_to_expiration =
-        days_to_expiration(&option.expiry).map_err(|error| GuardrailRejection {
+    let expiry_date = parse_expiry_date(&option.expiry).map_err(|error| GuardrailRejection {
+        symbol: record.symbol.clone(),
+        stage: "strategy".to_string(),
+        reason: format!("invalid option expiry {}: {error}", option.expiry),
+    })?;
+    let normalized_expiry = expiry_date.format("%Y%m%d").to_string();
+    let days_to_expiration = (expiry_date - Utc::now().date_naive()).num_days();
+    if days_to_expiration <= 0 {
+        return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
-            reason: format!("invalid option expiry {}: {error}", option.expiry),
-        })?;
+            reason: format!("expiry {} is no longer tradeable", option.expiry),
+        });
+    }
 
-    if days_to_expiration < config.min_expiry_days || days_to_expiration > config.max_expiry_days {
+    if let Some(target_expiry) = &config.target_expiry {
+        if normalized_expiry != *target_expiry {
+            return Err(GuardrailRejection {
+                symbol: record.symbol.clone(),
+                stage: "strategy".to_string(),
+                reason: format!(
+                    "expiry {} does not match configured TARGET_EXPIRY {}",
+                    option.expiry, target_expiry
+                ),
+            });
+        }
+    } else if days_to_expiration < config.min_expiry_days
+        || days_to_expiration > config.max_expiry_days
+    {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
@@ -142,6 +163,17 @@ pub fn evaluate_buy_write_candidate(
     let expiration_yield_pct = (expiration_profit / intrinsic_entry) * 100.0;
     let annualized_yield_pct = expiration_yield_pct / (days_to_expiration as f64 / 365.0);
 
+    if expiration_yield_pct < config.min_expiration_yield_pct {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!(
+                "expiration yield {:.2}% below configured minimum {:.2}%",
+                expiration_yield_pct, config.min_expiration_yield_pct
+            ),
+        });
+    }
+
     if annualized_yield_pct < config.min_annualized_yield_pct {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
@@ -181,7 +213,7 @@ pub fn evaluate_buy_write_candidate(
         beta,
         underlying_price,
         strike: option.strike,
-        expiry: option.expiry.clone(),
+        expiry: normalized_expiry,
         right: option.right.clone(),
         exchange: option.exchange.clone(),
         trading_class: option.trading_class.clone(),
@@ -199,12 +231,6 @@ pub fn evaluate_buy_write_candidate(
     })
 }
 
-fn days_to_expiration(expiry: &str) -> Result<i64> {
-    let parsed = parse_expiry_date(expiry)?;
-    let today = Utc::now().date_naive();
-    Ok((parsed - today).num_days())
-}
-
 pub fn parse_expiry_date(expiry: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(expiry, "%Y%m%d")
         .or_else(|_| NaiveDate::parse_from_str(expiry, "%Y-%m-%d"))
@@ -213,6 +239,8 @@ pub fn parse_expiry_date(expiry: &str) -> Result<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, Utc};
+
     use super::evaluate_buy_write_candidate;
     use crate::{
         config::StrategyConfig,
@@ -257,9 +285,11 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let config = StrategyConfig {
+            target_expiry: Some("20991217".to_string()),
             min_expiry_days: 1,
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
+            min_expiration_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
             min_itm_depth_pct: 0.0,
             min_downside_buffer_pct: 0.01,
@@ -313,9 +343,11 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let config = StrategyConfig {
+            target_expiry: Some("20991217".to_string()),
             min_expiry_days: 1,
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
+            min_expiration_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
             min_itm_depth_pct: 0.0,
             min_downside_buffer_pct: 0.01,
@@ -421,9 +453,11 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
+                target_expiry: Some("20991217".to_string()),
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
+                min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.01,
                 min_itm_depth_pct: 0.05,
                 min_downside_buffer_pct: 0.01,
@@ -478,9 +512,11 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
+                target_expiry: Some("20991217".to_string()),
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
+                min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.01,
                 min_itm_depth_pct: 0.0,
                 max_itm_depth_pct: 0.50,
@@ -538,9 +574,11 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
+                target_expiry: Some("20991217".to_string()),
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
+                min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.05,
                 min_itm_depth_pct: 0.0,
                 min_downside_buffer_pct: 0.01,
@@ -550,5 +588,126 @@ mod tests {
         .unwrap_err();
 
         assert!(rejection.reason.contains("expiration profit"));
+    }
+
+    #[test]
+    fn rejects_candidates_below_minimum_expiration_yield() {
+        let record = UniverseRecord {
+            symbol: "PTON".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "PTON".to_string(),
+            price: 10.0,
+            bid: Some(9.9),
+            ask: Some(10.1),
+            last: Some(10.0),
+            close: Some(9.8),
+            implied_volatility: None,
+            beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "PTON".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 9.6,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "PTON".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(0.5),
+            ask: Some(0.55),
+            last: Some(0.52),
+            close: Some(0.5),
+            option_price: Some(0.52),
+            implied_volatility: Some(0.3),
+            delta: Some(0.8),
+            underlying_price: Some(10.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
+        };
+
+        let rejection = evaluate_buy_write_candidate(
+            &record,
+            &underlying,
+            &option,
+            &StrategyConfig {
+                target_expiry: Some("20991217".to_string()),
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                min_annualized_yield_pct: 0.01,
+                min_expiration_yield_pct: 2.0,
+                min_expiration_profit_per_share: 0.01,
+                min_itm_depth_pct: 0.0,
+                min_downside_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(rejection.reason.contains("expiration yield"));
+    }
+
+    #[test]
+    fn allows_target_expiry_outside_default_day_window() {
+        let target_expiry = (Utc::now().date_naive() + Duration::days(7))
+            .format("%Y%m%d")
+            .to_string();
+        let record = UniverseRecord {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "AAPL".to_string(),
+            price: 100.0,
+            bid: Some(99.9),
+            ask: Some(100.1),
+            last: Some(100.0),
+            close: Some(99.5),
+            implied_volatility: None,
+            beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "AAPL".to_string(),
+            expiry: target_expiry.clone(),
+            strike: 90.0,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(14.0),
+            ask: Some(14.3),
+            last: Some(14.1),
+            close: Some(13.8),
+            option_price: Some(14.1),
+            implied_volatility: Some(0.25),
+            delta: Some(0.8),
+            underlying_price: Some(100.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
+        };
+
+        let candidate = evaluate_buy_write_candidate(
+            &record,
+            &underlying,
+            &option,
+            &StrategyConfig {
+                target_expiry: Some(target_expiry.clone()),
+                min_expiry_days: 30,
+                max_expiry_days: 60,
+                min_annualized_yield_pct: 0.01,
+                min_expiration_yield_pct: 0.01,
+                min_expiration_profit_per_share: 0.01,
+                min_itm_depth_pct: 0.0,
+                min_downside_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(candidate.expiry, target_expiry);
     }
 }

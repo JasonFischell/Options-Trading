@@ -265,38 +265,75 @@ fn load_universe_from_csv(path: &str, config: &AppConfig) -> Result<Vec<Universe
     let company_index = find_header_index(&headers, &["Company", "company"]);
     let beta_index = find_header_index(&headers, &["Beta", "BETA", "beta"]);
     let price_index = find_header_index(&headers, &["Price", "price"]);
+    let headerless_symbol_list =
+        ticker_index.is_none() && company_index.is_none() && headers.len() == 1;
 
     let ticker_regex = Regex::new(r"\((?:XNYS|XNAS|ARCX|XASE|XPHL|PINX|OTC):([A-Z\.]+)\)")
         .context("failed to compile ticker extraction regex")?;
 
     let mut records = Vec::new();
     let mut seen = BTreeSet::new();
+    if headerless_symbol_list {
+        push_universe_record(&mut records, &mut seen, headers.get(0), None, None, config);
+    }
     for result in reader.records() {
         let row = result.context("failed to read universe row")?;
-        let symbol = extract_symbol(&row, ticker_index, company_index, &ticker_regex);
+        let symbol = if headerless_symbol_list {
+            row.get(0)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.trim_matches('"').to_ascii_uppercase())
+        } else {
+            extract_symbol(&row, ticker_index, company_index, &ticker_regex)
+        };
         let Some(symbol) = symbol else {
             continue;
         };
 
-        if !seen.insert(symbol.clone()) {
-            continue;
-        }
-
-        if let Some(price) = parse_optional_f64(price_index.and_then(|index| row.get(index))) {
-            if price < config.risk.min_underlying_price || price > config.risk.max_underlying_price
-            {
-                continue;
-            }
-        }
-
-        let beta = parse_optional_f64(beta_index.and_then(|index| row.get(index)))
-            .filter(|value| *value > 0.0)
-            .unwrap_or(config.strategy.default_beta);
-
-        records.push(UniverseRecord { symbol, beta });
+        push_universe_record(
+            &mut records,
+            &mut seen,
+            Some(symbol.as_str()),
+            beta_index.and_then(|index| row.get(index)),
+            price_index.and_then(|index| row.get(index)),
+            config,
+        );
     }
 
     Ok(records)
+}
+
+fn push_universe_record(
+    records: &mut Vec<UniverseRecord>,
+    seen: &mut BTreeSet<String>,
+    symbol: Option<&str>,
+    beta: Option<&str>,
+    price: Option<&str>,
+    config: &AppConfig,
+) {
+    let Some(symbol) = symbol
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(|symbol| symbol.trim_matches('"').to_ascii_uppercase())
+    else {
+        return;
+    };
+
+    if let Some(price) = parse_optional_f64(price) {
+        if price < config.risk.min_underlying_price || price > config.risk.max_underlying_price {
+            return;
+        }
+    }
+
+    if !seen.insert(symbol.clone()) {
+        return;
+    }
+
+    let beta = parse_optional_f64(beta)
+        .filter(|value| *value > 0.0)
+        .unwrap_or(config.strategy.default_beta);
+
+    records.push(UniverseRecord { symbol, beta });
 }
 
 fn find_header_index(headers: &StringRecord, candidates: &[&str]) -> Option<usize> {
@@ -365,6 +402,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::{
         config::{
             AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
@@ -399,6 +438,43 @@ mod tests {
         let universe = load_universe(&config).unwrap();
         assert_eq!(universe.len(), 2);
         assert_eq!(universe[0].symbol, "AAPL");
+    }
+
+    #[test]
+    fn loads_headerless_symbol_list_csv() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("headerless-symbols-{unique}.csv"));
+        std::fs::write(&path, "SNAP\nRGTI\nSNAP\n").unwrap();
+
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
+            port: 4002,
+            client_id: 100,
+            account: "DU123".to_string(),
+            mode: RuntimeMode::Paper,
+            read_only: true,
+            connect_on_start: false,
+            run_mode: RunMode::Manual,
+            scan_schedule: "manual".to_string(),
+            market_data_mode: MarketDataMode::DelayedFrozen,
+            universe_file: Some(path.display().to_string()),
+            symbols: Vec::new(),
+            startup_warnings: Vec::new(),
+            strategy: StrategyConfig::default(),
+            risk: RiskConfig::default(),
+        };
+
+        let universe = load_universe(&config).unwrap();
+
+        assert_eq!(universe.len(), 2);
+        assert_eq!(universe[0].symbol, "SNAP");
+        assert_eq!(universe[1].symbol, "RGTI");
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

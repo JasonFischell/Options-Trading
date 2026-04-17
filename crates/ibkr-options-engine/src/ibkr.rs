@@ -433,7 +433,11 @@ pub fn select_buy_write_contracts(
                 Err(_) => continue,
             };
             let days_to_expiration = (expiry_date - chrono::Utc::now().date_naive()).num_days();
-            if days_to_expiration < config.strategy.min_expiry_days
+            if let Some(target_expiry) = &config.strategy.target_expiry {
+                if expiration != target_expiry {
+                    continue;
+                }
+            } else if days_to_expiration < config.strategy.min_expiry_days
                 || days_to_expiration > config.strategy.max_expiry_days
             {
                 continue;
@@ -833,6 +837,8 @@ pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, Utc};
+
     use super::{
         OptionChainMetadata, OptionChainSummary, SelectedOptionContract, SnapshotSummary,
         merge_snapshot_summary, normalize_market_price, option_resolution_candidates,
@@ -1045,5 +1051,59 @@ mod tests {
         assert_eq!(candidates[0].exchange, "SMART");
         assert_eq!(candidates[0].trading_class, "RGTI");
         assert_eq!(candidates[1].exchange, "EDGX");
+    }
+
+    #[test]
+    fn target_expiry_overrides_default_expiry_window() {
+        let target_expiry = (Utc::now().date_naive() + Duration::days(7))
+            .format("%Y%m%d")
+            .to_string();
+        let later_expiry = (Utc::now().date_naive() + Duration::days(35))
+            .format("%Y%m%d")
+            .to_string();
+        let chains = vec![OptionChainSummary {
+            underlying_contract_id: 123,
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            exchange: "SMART".to_string(),
+            expirations: vec![later_expiry, target_expiry.clone()],
+            strikes: vec![90.0, 95.0],
+        }];
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
+            port: 4002,
+            client_id: 100,
+            account: "DU123456".to_string(),
+            mode: RuntimeMode::Paper,
+            read_only: true,
+            connect_on_start: false,
+            run_mode: RunMode::Manual,
+            scan_schedule: "manual".to_string(),
+            market_data_mode: MarketDataMode::Live,
+            universe_file: None,
+            symbols: vec!["AAPL".to_string()],
+            startup_warnings: Vec::new(),
+            strategy: StrategyConfig {
+                target_expiry: Some(target_expiry.clone()),
+                min_expiry_days: 30,
+                max_expiry_days: 60,
+                min_itm_depth_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+            risk: RiskConfig {
+                max_option_quotes_per_underlying: 2,
+                ..RiskConfig::default()
+            },
+        };
+
+        let selected = select_buy_write_contracts("AAPL", &chains, 100.0, &config).unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert!(
+            selected
+                .iter()
+                .all(|contract| contract.expiration == target_expiry)
+        );
     }
 }

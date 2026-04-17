@@ -324,6 +324,7 @@ pub struct CycleReport {
     pub run_mode: String,
     pub schedule: String,
     pub market_data_mode: String,
+    pub account_state: AccountState,
     pub universe_size: usize,
     pub symbols_scanned: usize,
     pub underlying_snapshots: usize,
