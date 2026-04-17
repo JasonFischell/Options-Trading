@@ -200,29 +200,6 @@ pub struct OpenPositionState {
     pub average_stock_cost: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CoveredCallPositionState {
-    pub symbol: String,
-    pub stock_average_cost: f64,
-    pub short_call_credit: f64,
-    pub strike: f64,
-    pub shares: i32,
-    pub contracts: i32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExitRuleState {
-    pub profit_take_pct: f64,
-    pub max_loss_pct: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExitDecision {
-    pub symbol: String,
-    pub action: String,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstrumentType {
     Stock,
@@ -310,6 +287,25 @@ pub struct ExecutionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaperTradeLifecycleRecord {
+    pub symbol: String,
+    pub intent_key: String,
+    pub status: String,
+    pub first_recorded_at: DateTime<Utc>,
+    pub last_updated_at: DateTime<Utc>,
+    pub hold_until_close: bool,
+    pub stock_order_id: Option<i32>,
+    pub short_call_order_id: Option<i32>,
+    pub stock_filled_shares: f64,
+    pub short_call_filled_contracts: f64,
+    pub stock_average_fill_price: Option<f64>,
+    pub short_call_average_fill_price: Option<f64>,
+    pub observed_stock_shares: f64,
+    pub observed_short_call_contracts: f64,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CycleReport {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
@@ -325,6 +321,7 @@ pub struct CycleReport {
     pub proposed_orders: Vec<OrderIntent>,
     pub execution_records: Vec<ExecutionRecord>,
     pub open_positions: Vec<OpenPositionState>,
+    pub paper_trade_lifecycle: Vec<PaperTradeLifecycleRecord>,
     pub live_data_requested: bool,
     pub non_live_symbols: Vec<String>,
     pub warnings: Vec<String>,

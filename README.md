@@ -18,8 +18,9 @@ The Rust crate is organized around the runtime layers we want long term:
 - `config`: env-driven runtime, market-data, schedule, and guardrail settings
 - `market_data`: watchlist loading plus the replay-testable market-data boundary
 - `ibkr`: narrow Interactive Brokers adapter for connectivity, snapshots, positions, and chains
-- `strategy`: deep-ITM covered-call candidate evaluation and basic exit logic
+- `strategy`: deep-ITM covered-call candidate evaluation only
 - `state`: portfolio summaries and deep-ITM buy-write order-intent guardrails
+- `paper_state`: persistent paper-order idempotency and hold-to-close lifecycle tracking
 - `execution`: guarded dry-run plus paper-only stock-first submission layer
 - `scanner`: end-to-end cycle orchestration and cycle-report generation
 - `scoring`: legacy/reference scoring math carried forward for parity work
@@ -56,9 +57,9 @@ The engine currently supports:
 
 ### Phase D
 
-- Poll open paper positions
-- Apply basic profit-take and max-loss exits
-- Extend reporting around lifecycle events
+- Expand open paper-position monitoring
+- Improve hold-to-close lifecycle reporting
+- Revisit exits only in a later dedicated milestone
 
 ### Later Phases
 
@@ -83,7 +84,7 @@ The engine currently supports:
 
 The current screening defaults mirror the Python reference more closely for deep-ITM calls: `MIN_EXPIRY_DAYS=30`, `MAX_EXPIRY_DAYS=60`, `MIN_ITM_DEPTH_PCT=0.05`, `MIN_DOWNSIDE_BUFFER_PCT=0.12`, and `MIN_ANNUALIZED_YIELD_PCT=12`. Ranking now increases with both annualized return and ITM depth, while still scaling down higher-beta names.
 
-Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first and only advances the short call after fill reconciliation confirms covered shares. Live-money routing remains disabled.
+Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, refreshes open positions after broker activity, and only advances the short call after fill reconciliation confirms covered shares. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
 
 For thin delayed/frozen option markets, the scanner now retries one model-price snapshot before rejecting a contract as missing premium and includes IBKR notices plus the fields that were actually returned. This is especially useful for off-hours troubleshooting on `NVTS`, `PTON`, and `BB`, where delayed/frozen data often returns greeks or underlying marks without a usable bid/last/close on the option itself.
 

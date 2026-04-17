@@ -7,6 +7,7 @@ use crate::{
     execution::OrderExecutor,
     market_data::{MarketDataProvider, load_universe},
     models::{CycleReport, GuardrailRejection},
+    paper_state::PaperTradeLedger,
     state::build_order_intents,
     strategy::evaluate_buy_write_candidate,
 };
@@ -62,6 +63,7 @@ where
 
     let account = provider.load_account_state().await?;
     let positions = provider.load_inventory().await?;
+    let mut paper_trade_ledger = PaperTradeLedger::load(config)?;
 
     let mut guardrail_rejections = Vec::new();
     let mut candidates = Vec::new();
@@ -217,9 +219,10 @@ where
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let (mut proposed_orders, risk_rejections, open_positions) =
+    let (mut proposed_orders, risk_rejections, mut open_positions) =
         build_order_intents(&account, &positions, &candidates, config);
     guardrail_rejections.extend(risk_rejections);
+    paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
 
     if config.risk.enable_paper_orders
         && matches!(config.mode, crate::config::RuntimeMode::Paper)
@@ -256,9 +259,40 @@ where
                 true
             }
         });
+
+        proposed_orders = paper_trade_ledger.reject_duplicate_intents(
+            proposed_orders,
+            &mut guardrail_rejections,
+            &mut action_log,
+        );
     }
 
     let execution_records = executor.execute(&proposed_orders, config).await?;
+    paper_trade_ledger.record_execution_results(
+        &execution_records,
+        &proposed_orders,
+        &mut action_log,
+    );
+
+    if config.risk.enable_paper_orders
+        && matches!(config.mode, crate::config::RuntimeMode::Paper)
+        && !config.read_only
+        && !config.risk.enable_live_orders
+        && execution_records
+            .iter()
+            .any(|record| record.submission_mode == "paper" && record.symbol != "N/A")
+    {
+        let refreshed_positions = provider.load_inventory().await?;
+        open_positions = crate::state::summarize_open_positions(&refreshed_positions);
+        paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
+        action_log.push(
+            "Refreshed IBKR positions after paper submissions to update hold-to-close lifecycle state."
+                .to_string(),
+        );
+    }
+
+    paper_trade_ledger.persist(config)?;
+    let paper_trade_lifecycle = paper_trade_ledger.snapshot();
     for intent in &proposed_orders {
         action_log.push(format!(
             "{}: proposed {} with estimated net debit {:.2} and max profit {:.2}.",
@@ -288,6 +322,7 @@ where
         proposed_orders,
         execution_records,
         open_positions,
+        paper_trade_lifecycle,
         live_data_requested: config.prefers_live_market_data(),
         non_live_symbols: non_live_symbols.into_iter().collect(),
         warnings,
@@ -302,7 +337,7 @@ where
                 && !config.read_only
                 && !config.risk.enable_live_orders
             {
-                "Deep-ITM covered-call buy-write execution submits the stock leg first in paper mode and only advances the short call after fill reconciliation."
+                "Deep-ITM covered-call buy-write execution submits the stock leg first in paper mode, persists idempotency state on disk, and only advances the short call after fill reconciliation."
                     .to_string()
             } else if config.risk.enable_live_orders
                 || matches!(config.mode, crate::config::RuntimeMode::Live)
@@ -313,6 +348,8 @@ where
                 "Deep-ITM covered-call buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
                     .to_string()
             },
+            "No automated exit strategy is implemented in this milestone; tracked paper positions remain hold-to-close only until IBKR reports them closed."
+                .to_string(),
         ],
     })
 }
@@ -424,8 +461,15 @@ mod tests {
         }
     }
 
+    fn test_ledger_path(account: &str) -> std::path::PathBuf {
+        std::path::Path::new("logs").join(format!("paper-trade-state-{account}.json"))
+    }
+
     #[tokio::test]
     async fn builds_one_ranked_candidate_and_order_intent() {
+        let ledger_path = test_ledger_path("DU123");
+        let _ = std::fs::remove_file(&ledger_path);
+
         let mut symbols = HashMap::new();
         symbols.insert(
             "AAPL".to_string(),
@@ -483,10 +527,16 @@ mod tests {
 
         assert_eq!(report.candidates_ranked, 1);
         assert_eq!(report.proposed_orders.len(), 1);
+        assert!(report.paper_trade_lifecycle.is_empty());
+
+        let _ = std::fs::remove_file(ledger_path);
     }
 
     #[tokio::test]
     async fn blocks_paper_submission_when_candidate_uses_non_live_data() {
+        let ledger_path = test_ledger_path("DU123");
+        let _ = std::fs::remove_file(&ledger_path);
+
         let mut config = test_config();
         config.read_only = false;
         config.market_data_mode = MarketDataMode::Live;
@@ -568,5 +618,109 @@ mod tests {
                 .any(|warning| warning.contains("Paper submission was blocked"))
         );
         assert_eq!(executor.recorded.lock().unwrap().len(), 0);
+
+        let _ = std::fs::remove_file(ledger_path);
+    }
+
+    #[tokio::test]
+    async fn blocks_duplicate_paper_intent_from_persisted_state() {
+        let mut config = test_config();
+        config.account = "DU123-IDEMPOTENT".to_string();
+        config.read_only = false;
+        config.market_data_mode = MarketDataMode::Live;
+        config.risk.enable_paper_orders = true;
+
+        let ledger_path = test_ledger_path(&config.account);
+        std::fs::create_dir_all("logs").unwrap();
+        std::fs::write(
+            &ledger_path,
+            serde_json::json!({
+                "entries": [{
+                    "symbol": "AAPL",
+                    "intent_key": "AAPL|deep-ITM covered-call buy-write|seed",
+                    "status": "stock-pending",
+                    "first_recorded_at": "2026-04-16T00:00:00Z",
+                    "last_updated_at": "2026-04-16T00:00:00Z",
+                    "hold_until_close": true,
+                    "stock_order_id": 10,
+                    "short_call_order_id": null,
+                    "stock_filled_shares": 0.0,
+                    "short_call_filled_contracts": 0.0,
+                    "stock_average_fill_price": null,
+                    "short_call_average_fill_price": null,
+                    "observed_stock_shares": 0.0,
+                    "observed_short_call_contracts": 0.0,
+                    "note": "seeded"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "AAPL".to_string(),
+            SymbolMarketSnapshot {
+                underlying: UnderlyingSnapshot {
+                    symbol: "AAPL".to_string(),
+                    price: 100.0,
+                    bid: Some(99.9),
+                    ask: Some(100.1),
+                    last: Some(100.0),
+                    close: Some(99.5),
+                    implied_volatility: None,
+                    beta: Some(1.1),
+                    price_source: "realtime-or-frozen".to_string(),
+                    market_data_notices: Vec::new(),
+                },
+                option_quotes: vec![OptionQuoteSnapshot {
+                    symbol: "AAPL".to_string(),
+                    expiry: "20991217".to_string(),
+                    strike: 90.0,
+                    right: "C".to_string(),
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    bid: Some(14.00),
+                    ask: Some(14.30),
+                    last: Some(14.10),
+                    close: Some(13.80),
+                    option_price: Some(14.10),
+                    implied_volatility: Some(0.2),
+                    delta: Some(0.8),
+                    underlying_price: Some(100.0),
+                    quote_source: Some("test".to_string()),
+                    diagnostics: Vec::new(),
+                }],
+            },
+        );
+
+        let executor = RecordingExecutor::default();
+        let report = run_scan_cycle(
+            &ReplayProvider {
+                account: AccountState {
+                    account: "DU123".to_string(),
+                    available_funds: Some(20_000.0),
+                    buying_power: Some(20_000.0),
+                    net_liquidation: Some(30_000.0),
+                },
+                positions: Vec::new(),
+                symbols,
+            },
+            &executor,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.proposed_orders.is_empty());
+        assert!(
+            report.guardrail_rejections.iter().any(|rejection| {
+                rejection.symbol == "AAPL" && rejection.stage == "idempotency"
+            })
+        );
+        assert_eq!(executor.recorded.lock().unwrap().len(), 0);
+
+        std::fs::remove_file(ledger_path).unwrap();
     }
 }

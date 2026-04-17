@@ -12,10 +12,13 @@ env/
 
 # Local outputs
 *.log
+logs/*.json
+logs/paper-trade-state-*.json
 *.tmp
 *.bak
 Sorted_Options_List.csv
 target/
+target-codex-*/
 
 # Secrets and local overrides
 .env

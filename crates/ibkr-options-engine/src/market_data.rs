@@ -444,6 +444,8 @@ mod tests {
         assert!(delayed_retry_available(&[
             "10089: Requested market data requires additional subscription for API. Delayed market data is available.".to_string()
         ]));
-        assert!(!delayed_retry_available(&["observed data origin: unknown".to_string()]));
+        assert!(!delayed_retry_available(&[
+            "observed data origin: unknown".to_string()
+        ]));
     }
 }

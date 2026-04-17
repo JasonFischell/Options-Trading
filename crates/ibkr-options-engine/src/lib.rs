@@ -3,6 +3,7 @@ pub mod execution;
 pub mod ibkr;
 pub mod market_data;
 pub mod models;
+pub mod paper_state;
 pub mod reporting;
 pub mod scanner;
 pub mod scoring;

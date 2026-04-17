@@ -105,8 +105,6 @@ pub struct StrategyConfig {
     pub min_downside_buffer_pct: f64,
     pub min_option_bid: f64,
     pub max_option_spread_pct: f64,
-    pub profit_take_pct: f64,
-    pub max_loss_pct: f64,
 }
 
 impl Default for StrategyConfig {
@@ -121,8 +119,6 @@ impl Default for StrategyConfig {
             min_downside_buffer_pct: 0.12,
             min_option_bid: 0.15,
             max_option_spread_pct: 0.25,
-            profit_take_pct: 0.5,
-            max_loss_pct: 0.1,
         }
     }
 }
@@ -271,15 +267,6 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MAX_OPTION_SPREAD_PCT must be numeric")?,
-                profit_take_pct: env_or_default(
-                    "PROFIT_TAKE_PCT",
-                    &defaults.profit_take_pct.to_string(),
-                )?
-                .parse()
-                .context("PROFIT_TAKE_PCT must be numeric")?,
-                max_loss_pct: env_or_default("MAX_LOSS_PCT", &defaults.max_loss_pct.to_string())?
-                    .parse()
-                    .context("MAX_LOSS_PCT must be numeric")?,
             },
             risk: RiskConfig {
                 min_underlying_price: env_or_default(

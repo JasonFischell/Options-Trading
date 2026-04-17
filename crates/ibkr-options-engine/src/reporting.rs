@@ -16,7 +16,11 @@ pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<(
     let base_name = format!(
         "scan-{}-{}-{}",
         timestamp,
-        config.platform.label().to_ascii_lowercase().replace(' ', "-"),
+        config
+            .platform
+            .label()
+            .to_ascii_lowercase()
+            .replace(' ', "-"),
         config.account
     );
 
@@ -25,8 +29,12 @@ pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<(
 
     fs::write(&human_log_path, render_human_log(config, report))
         .with_context(|| format!("failed to write human log to {}", human_log_path.display()))?;
-    fs::write(&json_report_path, serde_json::to_string_pretty(report)?)
-        .with_context(|| format!("failed to write JSON report to {}", json_report_path.display()))?;
+    fs::write(&json_report_path, serde_json::to_string_pretty(report)?).with_context(|| {
+        format!(
+            "failed to write JSON report to {}",
+            json_report_path.display()
+        )
+    })?;
 
     Ok((human_log_path, json_report_path))
 }
@@ -56,6 +64,10 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             report.candidates_ranked,
             report.proposed_orders.len(),
             report.execution_records.len()
+        ),
+        format!(
+            "Tracked paper lifecycle records: {}",
+            report.paper_trade_lifecycle.len()
         ),
     ];
 
@@ -89,6 +101,24 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             lines.push(format!(
                 "- {} [{}] {}",
                 rejection.symbol, rejection.stage, rejection.reason
+            ));
+        }
+    }
+
+    if !report.paper_trade_lifecycle.is_empty() {
+        lines.push(String::new());
+        lines.push("Paper lifecycle:".to_string());
+        for lifecycle in &report.paper_trade_lifecycle {
+            lines.push(format!(
+                "- {} [{}] stock_fill={:.0} short_call_fill={:.0} observed_shares={:.0} observed_short_calls={:.0} hold_until_close={} note={}",
+                lifecycle.symbol,
+                lifecycle.status,
+                lifecycle.stock_filled_shares,
+                lifecycle.short_call_filled_contracts,
+                lifecycle.observed_stock_shares,
+                lifecycle.observed_short_call_contracts,
+                lifecycle.hold_until_close,
+                lifecycle.note
             ));
         }
     }

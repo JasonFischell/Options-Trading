@@ -4,8 +4,8 @@ use chrono::{NaiveDate, Utc};
 use crate::{
     config::StrategyConfig,
     models::{
-        CoveredCallPositionState, ExitDecision, ExitRuleState, GuardrailRejection,
-        OptionQuoteSnapshot, ScoredOptionCandidate, UnderlyingSnapshot, UniverseRecord,
+        GuardrailRejection, OptionQuoteSnapshot, ScoredOptionCandidate, UnderlyingSnapshot,
+        UniverseRecord,
     },
 };
 
@@ -185,43 +185,6 @@ pub fn evaluate_buy_write_candidate(
     })
 }
 
-pub fn evaluate_basic_exit(
-    position: &CoveredCallPositionState,
-    current_underlying_price: f64,
-    current_option_mark: f64,
-    rules: &ExitRuleState,
-) -> Option<ExitDecision> {
-    let covered_entry = (position.stock_average_cost - position.short_call_credit).max(0.01);
-    let covered_mark = current_underlying_price - current_option_mark;
-    let pnl_pct = (covered_mark - covered_entry) / covered_entry;
-
-    if pnl_pct >= rules.profit_take_pct {
-        return Some(ExitDecision {
-            symbol: position.symbol.clone(),
-            action: "close_position".to_string(),
-            reason: format!(
-                "deep-ITM covered-call profit {:.2}% reached target {:.2}%",
-                pnl_pct * 100.0,
-                rules.profit_take_pct * 100.0
-            ),
-        });
-    }
-
-    if pnl_pct <= -rules.max_loss_pct {
-        return Some(ExitDecision {
-            symbol: position.symbol.clone(),
-            action: "close_position".to_string(),
-            reason: format!(
-                "deep-ITM covered-call loss {:.2}% breached max loss {:.2}%",
-                pnl_pct.abs() * 100.0,
-                rules.max_loss_pct * 100.0
-            ),
-        });
-    }
-
-    None
-}
-
 fn days_to_expiration(expiry: &str) -> Result<i64> {
     let parsed = parse_expiry_date(expiry)?;
     let today = Utc::now().date_naive();
@@ -236,13 +199,10 @@ pub fn parse_expiry_date(expiry: &str) -> Result<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate_basic_exit, evaluate_buy_write_candidate};
+    use super::evaluate_buy_write_candidate;
     use crate::{
         config::StrategyConfig,
-        models::{
-            CoveredCallPositionState, ExitRuleState, OptionQuoteSnapshot, UnderlyingSnapshot,
-            UniverseRecord,
-        },
+        models::{OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord},
     };
 
     #[test]
@@ -424,7 +384,9 @@ mod tests {
             implied_volatility: None,
             beta: Some(1.2),
             price_source: "delayed-or-delayed-frozen".to_string(),
-            market_data_notices: vec!["observed data origin: delayed-or-delayed-frozen".to_string()],
+            market_data_notices: vec![
+                "observed data origin: delayed-or-delayed-frozen".to_string(),
+            ],
         };
         let option = OptionQuoteSnapshot {
             symbol: "BTBT".to_string(),
@@ -463,27 +425,5 @@ mod tests {
         .unwrap_err();
 
         assert!(rejection.reason.contains("expiration profit"));
-    }
-
-    #[test]
-    fn exit_rule_triggers_profit_take() {
-        let decision = evaluate_basic_exit(
-            &CoveredCallPositionState {
-                symbol: "MSFT".to_string(),
-                stock_average_cost: 100.0,
-                short_call_credit: 2.0,
-                strike: 105.0,
-                shares: 100,
-                contracts: 1,
-            },
-            110.0,
-            0.25,
-            &ExitRuleState {
-                profit_take_pct: 0.05,
-                max_loss_pct: 0.1,
-            },
-        );
-
-        assert!(decision.is_some());
     }
 }
