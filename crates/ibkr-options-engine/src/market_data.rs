@@ -12,8 +12,7 @@ use crate::{
     config::AppConfig,
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
-        fetch_positions, is_invalid_option_contract_error, log_server_time,
-        market_data_mode_label,
+        fetch_positions, is_invalid_option_contract_error, log_server_time, market_data_mode_label,
         request_option_chain_for_underlying, request_option_quote, request_underlying_snapshot,
         resolve_primary_stock_contract_id, select_buy_write_contracts, switch_market_data_mode,
     },
@@ -127,7 +126,7 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                     reference_price,
                     requested_market_data_mode = %market_data_mode_label(config.market_data_mode),
                     error = %error,
-                    "unable to select buy-write option contracts from IBKR chain"
+                    "unable to select deep-ITM buy-write option contracts from IBKR chain"
                 );
                 return Ok(Some(SymbolMarketSnapshot {
                     underlying,

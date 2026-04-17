@@ -3,14 +3,16 @@ use crate::models::{OptionCandidate, ScoreInputs, UnderlyingSnapshot};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScoreThresholds {
     pub min_yield_threshold: f64,
-    pub min_buffer_threshold: f64,
+    pub min_itm_depth_threshold: f64,
+    pub min_downside_buffer_threshold: f64,
 }
 
 impl Default for ScoreThresholds {
     fn default() -> Self {
         Self {
-            min_yield_threshold: 0.05,
-            min_buffer_threshold: 0.20,
+            min_yield_threshold: 0.02,
+            min_itm_depth_threshold: 0.05,
+            min_downside_buffer_threshold: 0.12,
         }
     }
 }
@@ -30,28 +32,34 @@ pub fn score_option(
         return None;
     }
 
-    let intrinsic_entry = if inputs.is_call {
-        inputs.underlying_price - inputs.premium
-    } else {
-        inputs.strike - inputs.premium
-    };
+    if !inputs.is_call {
+        return None;
+    }
+
+    let intrinsic_entry = inputs.underlying_price - inputs.premium;
 
     if intrinsic_entry <= 0.0 {
         return None;
     }
 
-    let margin_income = (inputs.strike - intrinsic_entry).max(0.0);
-    let margin_yield = (margin_income / intrinsic_entry).max(0.0);
-    let price_buffer = (inputs.underlying_price - inputs.strike) / inputs.underlying_price;
-    let loss_buffer = (inputs.underlying_price - intrinsic_entry) / inputs.underlying_price;
+    let itm_depth = (inputs.underlying_price - inputs.strike) / inputs.underlying_price;
+    if itm_depth <= 0.0 {
+        return None;
+    }
+
+    let expiration_income = (inputs.strike - intrinsic_entry).max(0.0);
+    let margin_yield = (expiration_income / intrinsic_entry).max(0.0);
+    let downside_buffer = inputs.premium / inputs.underlying_price;
 
     if margin_yield <= thresholds.min_yield_threshold
-        || loss_buffer <= thresholds.min_buffer_threshold
+        || itm_depth <= thresholds.min_itm_depth_threshold
+        || downside_buffer <= thresholds.min_downside_buffer_threshold
     {
         return None;
     }
 
-    let score = margin_yield * price_buffer / inputs.beta.sqrt();
+    let score = (margin_yield / (inputs.days_to_expiration as f64 / 365.0)) * itm_depth
+        / inputs.beta.sqrt();
     let annualized_yield_pct = margin_yield / (inputs.days_to_expiration as f64 / 365.0) * 100.0;
 
     Some(OptionCandidate {
@@ -90,7 +98,7 @@ mod tests {
             ScoreInputs {
                 underlying_price: 180.0,
                 strike: 150.0,
-                premium: 50.0,
+                premium: 36.0,
                 days_to_expiration: 31,
                 beta: 1.1,
                 is_call: true,

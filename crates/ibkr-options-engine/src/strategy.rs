@@ -57,18 +57,12 @@ pub fn evaluate_buy_write_candidate(
         }
     }
 
-    if let Some(delta) = option.delta {
-        if delta.abs() > config.max_short_call_delta {
-            return Err(GuardrailRejection {
-                symbol: record.symbol.clone(),
-                stage: "strategy".to_string(),
-                reason: format!(
-                    "call delta {:.2} exceeds configured cap {:.2}",
-                    delta.abs(),
-                    config.max_short_call_delta
-                ),
-            });
-        }
+    if option.right.trim().to_ascii_uppercase() != "C" {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!("option right {} is not a call", option.right),
+        });
     }
 
     let days_to_expiration =
@@ -89,31 +83,42 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    let strike_buffer_pct = (option.strike - underlying_price) / underlying_price;
-    if strike_buffer_pct < config.min_strike_buffer_pct {
+    let itm_depth_pct = (underlying_price - option.strike) / underlying_price;
+    if itm_depth_pct <= 0.0 {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
-                "strike buffer {:.2}% below configured minimum {:.2}%",
-                strike_buffer_pct * 100.0,
-                config.min_strike_buffer_pct * 100.0
+                "strike {:.2} is not in the money versus underlying {:.2}",
+                option.strike, underlying_price
             ),
         });
     }
 
-    let net_debit = underlying_price - premium;
-    if net_debit <= 0.0 {
+    if itm_depth_pct < config.min_itm_depth_pct {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
-            reason: "net debit is non-positive after premium credit".to_string(),
+            reason: format!(
+                "ITM depth {:.2}% below configured minimum {:.2}%",
+                itm_depth_pct * 100.0,
+                config.min_itm_depth_pct * 100.0
+            ),
         });
     }
 
-    let max_profit = (option.strike - underlying_price).max(0.0) + premium;
-    let max_profit_yield_pct = (max_profit / net_debit) * 100.0;
-    let annualized_yield_pct = max_profit_yield_pct / (days_to_expiration as f64 / 365.0);
+    let intrinsic_entry = underlying_price - premium;
+    if intrinsic_entry <= 0.0 {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: "intrinsic entry is non-positive after premium credit".to_string(),
+        });
+    }
+
+    let expiration_profit = (option.strike - intrinsic_entry).max(0.0);
+    let expiration_yield_pct = (expiration_profit / intrinsic_entry) * 100.0;
+    let annualized_yield_pct = expiration_yield_pct / (days_to_expiration as f64 / 365.0);
 
     if annualized_yield_pct < config.min_annualized_yield_pct {
         return Err(GuardrailRejection {
@@ -126,13 +131,26 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
+    let downside_buffer_pct = premium / underlying_price;
+    if downside_buffer_pct < config.min_downside_buffer_pct {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!(
+                "downside buffer {:.2}% below configured minimum {:.2}%",
+                downside_buffer_pct * 100.0,
+                config.min_downside_buffer_pct * 100.0
+            ),
+        });
+    }
+
     let beta = if record.beta > 0.0 {
         record.beta
     } else {
         config.default_beta
     };
 
-    let score = (annualized_yield_pct / 100.0) * (1.0 + strike_buffer_pct) / beta.sqrt();
+    let score = (annualized_yield_pct / 100.0) * itm_depth_pct / beta.sqrt();
 
     Ok(ScoredOptionCandidate {
         symbol: record.symbol.clone(),
@@ -148,9 +166,10 @@ pub fn evaluate_buy_write_candidate(
         option_bid: premium,
         option_ask: option.ask,
         delta: option.delta,
-        strike_buffer_pct,
+        itm_depth_pct,
+        downside_buffer_pct,
         annualized_yield_pct,
-        max_profit_yield_pct,
+        expiration_yield_pct,
         score,
     })
 }
@@ -170,7 +189,7 @@ pub fn evaluate_basic_exit(
             symbol: position.symbol.clone(),
             action: "close_position".to_string(),
             reason: format!(
-                "covered-call profit {:.2}% reached target {:.2}%",
+                "deep-ITM covered-call profit {:.2}% reached target {:.2}%",
                 pnl_pct * 100.0,
                 rules.profit_take_pct * 100.0
             ),
@@ -182,7 +201,7 @@ pub fn evaluate_basic_exit(
             symbol: position.symbol.clone(),
             action: "close_position".to_string(),
             reason: format!(
-                "covered-call loss {:.2}% breached max loss {:.2}%",
+                "deep-ITM covered-call loss {:.2}% breached max loss {:.2}%",
                 pnl_pct.abs() * 100.0,
                 rules.max_loss_pct * 100.0
             ),
@@ -216,7 +235,7 @@ mod tests {
     };
 
     #[test]
-    fn builds_scored_buy_write_candidate() {
+    fn builds_scored_deep_itm_buy_write_candidate() {
         let record = UniverseRecord {
             symbol: "AAPL".to_string(),
             beta: 1.1,
@@ -236,18 +255,18 @@ mod tests {
         let option = OptionQuoteSnapshot {
             symbol: "AAPL".to_string(),
             expiry: "20991217".to_string(),
-            strike: 103.0,
+            strike: 90.0,
             right: "C".to_string(),
             exchange: "SMART".to_string(),
             trading_class: "AAPL".to_string(),
             multiplier: "100".to_string(),
-            bid: Some(1.50),
-            ask: Some(1.60),
-            last: Some(1.55),
-            close: Some(1.45),
-            option_price: Some(1.55),
+            bid: Some(14.00),
+            ask: Some(14.30),
+            last: Some(14.10),
+            close: Some(13.80),
+            option_price: Some(14.10),
             implied_volatility: Some(0.25),
-            delta: Some(0.25),
+            delta: Some(0.80),
             underlying_price: Some(100.0),
             quote_source: Some("test".to_string()),
             diagnostics: Vec::new(),
@@ -256,6 +275,8 @@ mod tests {
             min_expiry_days: 1,
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
+            min_itm_depth_pct: 0.01,
+            min_downside_buffer_pct: 0.01,
             ..StrategyConfig::default()
         };
 
@@ -264,6 +285,8 @@ mod tests {
         assert_eq!(candidate.symbol, "AAPL");
         assert_eq!(candidate.exchange, "SMART");
         assert!(candidate.annualized_yield_pct > 0.0);
+        assert!(candidate.itm_depth_pct > 0.0);
+        assert!(candidate.score > 0.0);
     }
 
     #[test]
@@ -314,6 +337,62 @@ mod tests {
                 .reason
                 .contains("available fields: delta, underlying_price")
         );
+    }
+
+    #[test]
+    fn rejects_calls_that_are_not_deep_enough_itm() {
+        let record = UniverseRecord {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "AAPL".to_string(),
+            price: 100.0,
+            bid: Some(99.9),
+            ask: Some(100.1),
+            last: Some(100.0),
+            close: Some(99.5),
+            implied_volatility: None,
+            beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "AAPL".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 98.0,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(4.0),
+            ask: Some(4.2),
+            last: Some(4.1),
+            close: Some(4.0),
+            option_price: Some(4.1),
+            implied_volatility: Some(0.2),
+            delta: Some(0.55),
+            underlying_price: Some(100.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
+        };
+
+        let rejection = evaluate_buy_write_candidate(
+            &record,
+            &underlying,
+            &option,
+            &StrategyConfig {
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                min_annualized_yield_pct: 0.01,
+                min_itm_depth_pct: 0.05,
+                min_downside_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(rejection.reason.contains("ITM depth"));
     }
 
     #[test]

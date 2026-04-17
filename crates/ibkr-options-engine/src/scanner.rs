@@ -171,7 +171,7 @@ where
                 && !config.read_only
                 && !config.risk.enable_live_orders
             {
-                "Buy-write execution submits the stock leg first in paper mode and only advances the short call after fill reconciliation."
+                "Deep-ITM covered-call buy-write execution submits the stock leg first in paper mode and only advances the short call after fill reconciliation."
                     .to_string()
             } else if config.risk.enable_live_orders
                 || matches!(config.mode, crate::config::RuntimeMode::Live)
@@ -179,7 +179,7 @@ where
                 "Live-order routing remains disabled; this cycle stayed on the guarded paper/dry-run path."
                     .to_string()
             } else {
-                "Buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
+                "Deep-ITM covered-call buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
                     .to_string()
             },
         ],
@@ -281,6 +281,8 @@ mod tests {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
+                min_itm_depth_pct: 0.01,
+                min_downside_buffer_pct: 0.01,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -312,18 +314,18 @@ mod tests {
                 option_quotes: vec![OptionQuoteSnapshot {
                     symbol: "AAPL".to_string(),
                     expiry: "20991217".to_string(),
-                    strike: 103.0,
+                    strike: 90.0,
                     right: "C".to_string(),
                     exchange: "SMART".to_string(),
                     trading_class: "AAPL".to_string(),
                     multiplier: "100".to_string(),
-                    bid: Some(1.60),
-                    ask: Some(1.70),
-                    last: Some(1.65),
-                    close: Some(1.55),
-                    option_price: Some(1.65),
+                    bid: Some(14.00),
+                    ask: Some(14.30),
+                    last: Some(14.10),
+                    close: Some(13.80),
+                    option_price: Some(14.10),
                     implied_volatility: Some(0.2),
-                    delta: Some(0.25),
+                    delta: Some(0.8),
                     underlying_price: Some(100.0),
                     quote_source: Some("test".to_string()),
                     diagnostics: Vec::new(),

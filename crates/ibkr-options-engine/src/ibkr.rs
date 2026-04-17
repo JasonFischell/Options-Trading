@@ -369,7 +369,7 @@ pub fn select_buy_write_contracts(
     reference_price: f64,
     config: &AppConfig,
 ) -> Result<Vec<SelectedOptionContract>> {
-    let min_strike = reference_price * (1.0 + config.strategy.min_strike_buffer_pct);
+    let max_strike = reference_price * (1.0 - config.strategy.min_itm_depth_pct);
     let mut candidates: Vec<SelectedOptionContract> = Vec::new();
     let mut total_expirations = 0usize;
     let mut expirations_in_window = 0usize;
@@ -394,11 +394,13 @@ pub fn select_buy_write_contracts(
                 .strikes
                 .iter()
                 .copied()
-                .filter(|strike| *strike >= min_strike)
+                .filter(|strike| *strike > 0.0 && *strike <= max_strike)
                 .collect::<Vec<_>>();
             strikes_in_window += strikes.len();
             strikes.sort_by(|left, right| {
-                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                (reference_price - right)
+                    .partial_cmp(&(reference_price - left))
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             for strike in strikes
@@ -442,9 +444,8 @@ pub fn select_buy_write_contracts(
 
     candidates.sort_by(|left, right| {
         left.expiration.cmp(&right.expiration).then_with(|| {
-            (left.strike - reference_price)
-                .abs()
-                .partial_cmp(&(right.strike - reference_price).abs())
+            (reference_price - right.strike)
+                .partial_cmp(&(reference_price - left.strike))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
     });
@@ -452,7 +453,7 @@ pub fn select_buy_write_contracts(
 
     if candidates.is_empty() {
         anyhow::bail!(
-            "no buy-write option contracts matched for {symbol}; reference_price={reference_price:.2}, min_strike={min_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_at_or_above_min={}",
+            "no deep-ITM buy-write option contracts matched for {symbol}; reference_price={reference_price:.2}, max_strike={max_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_at_or_below_max={}",
             chains.len(),
             total_expirations,
             expirations_in_window,
@@ -696,7 +697,10 @@ impl SnapshotSummary {
             ));
         }
 
-        diagnostics.push(format!("observed data origin: {}", self.data_origin_label()));
+        diagnostics.push(format!(
+            "observed data origin: {}",
+            self.data_origin_label()
+        ));
 
         diagnostics
     }
@@ -721,7 +725,7 @@ mod tests {
     };
 
     #[test]
-    fn selects_otm_contracts_on_earliest_expiration() {
+    fn selects_deep_itm_contracts_on_earliest_expiration() {
         let chains = vec![OptionChainSummary {
             underlying_contract_id: 123,
             trading_class: "PTON".to_string(),
@@ -747,7 +751,7 @@ mod tests {
             strategy: StrategyConfig {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
-                min_strike_buffer_pct: 0.01,
+                min_itm_depth_pct: 0.05,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -756,10 +760,11 @@ mod tests {
             },
         };
 
-        let selected = select_buy_write_contracts("PTON", &chains, 4.6, &config).unwrap();
+        let selected = select_buy_write_contracts("PTON", &chains, 5.4, &config).unwrap();
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].expiration, "20991217");
         assert_eq!(selected[0].right, "C");
+        assert_eq!(selected[0].strike, 4.0);
         assert_eq!(selected[0].chain_metadata.len(), 1);
         assert_eq!(selected[0].chain_metadata[0].trading_class, "PTON");
     }
@@ -801,7 +806,7 @@ mod tests {
             strategy: StrategyConfig {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
-                min_strike_buffer_pct: 0.01,
+                min_itm_depth_pct: 0.05,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -810,7 +815,7 @@ mod tests {
             },
         };
 
-        let selected = select_buy_write_contracts("AAPL", &chains, 100.0, &config).unwrap();
+        let selected = select_buy_write_contracts("AAPL", &chains, 120.0, &config).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].chain_metadata.len(), 2);
         assert_eq!(selected[0].chain_metadata[0].exchange, "SMART");

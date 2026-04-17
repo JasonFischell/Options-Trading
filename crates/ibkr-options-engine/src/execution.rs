@@ -270,7 +270,7 @@ where
             })
             .with_context(|| {
                 format!(
-                    "buy-write intent for {} is missing the stock buy leg",
+                    "deep-ITM buy-write intent for {} is missing the stock buy leg",
                     intent.symbol
                 )
             })?;
@@ -282,7 +282,7 @@ where
             })
             .with_context(|| {
                 format!(
-                    "buy-write intent for {} is missing the short-call leg",
+                    "deep-ITM buy-write intent for {} is missing the short-call leg",
                     intent.symbol
                 )
             })?;
@@ -326,7 +326,7 @@ where
             symbol: intent.symbol.clone(),
             status: fill_reconciliation.status.clone(),
             submission_mode: "paper".to_string(),
-            note: "submitted guarded buy-write legs in paper mode using stock-first sequencing"
+            note: "submitted guarded deep-ITM covered-call buy-write legs in paper mode using stock-first sequencing"
                 .to_string(),
             legs: vec![stock_record, option_record],
             fill_reconciliation: Some(fill_reconciliation),
@@ -447,7 +447,7 @@ fn build_ibkr_order(intent: &OrderIntent, leg: &OrderLegIntent) -> Result<Order>
     let mut order = order_builder::limit_order(action, leg.quantity as f64, limit_price);
     order.account = intent.account.clone();
     order.order_ref = format!(
-        "buywrite:{}:{}:{}",
+        "deepitm-buywrite:{}:{}:{}",
         intent.symbol,
         match leg.instrument_type {
             InstrumentType::Stock => "stock",
@@ -612,8 +612,9 @@ fn reconcile_buy_write_fill(
             .unwrap_or(false)
         {
             (
-                "covered-call-open".to_string(),
-                "stock and short-call fills reconcile to a covered paper position".to_string(),
+                "deep-itm-covered-call-open".to_string(),
+                "stock and short-call fills reconcile to a deep-ITM covered-call paper position"
+                    .to_string(),
             )
         } else if option_summary.is_some() {
             (
@@ -733,12 +734,12 @@ mod tests {
     fn buy_write_intent() -> OrderIntent {
         OrderIntent {
             symbol: "AAPL".to_string(),
-            strategy: "buy-write covered call".to_string(),
+            strategy: "deep-ITM covered-call buy-write".to_string(),
             account: "DU1234567".to_string(),
             mode: "paper-stock-first".to_string(),
-            estimated_net_debit: 9_850.0,
-            estimated_credit: 150.0,
-            max_profit: 450.0,
+            estimated_net_debit: 8_600.0,
+            estimated_credit: 1_400.0,
+            max_profit: 400.0,
             legs: vec![
                 OrderLegIntent {
                     instrument_type: InstrumentType::Stock,
@@ -759,11 +760,11 @@ mod tests {
                     instrument_type: InstrumentType::Option,
                     action: TradeAction::Sell,
                     symbol: "AAPL".to_string(),
-                    description: "Sell 1 covered call AAPL 20260515 103".to_string(),
+                    description: "Sell 1 deep-ITM covered call AAPL 20260515 90".to_string(),
                     quantity: 1,
-                    limit_price: Some(1.5),
+                    limit_price: Some(14.0),
                     expiry: Some("20260515".to_string()),
-                    strike: Some(103.0),
+                    strike: Some(90.0),
                     right: Some("C".to_string()),
                     exchange: Some("SMART".to_string()),
                     trading_class: Some("AAPL".to_string()),
@@ -791,7 +792,7 @@ mod tests {
         );
         assert_eq!(option_order.account, "DU1234567");
         assert_eq!(option_order.total_quantity, 1.0);
-        assert_eq!(option_order.limit_price, Some(1.5));
+        assert_eq!(option_order.limit_price, Some(14.0));
     }
 
     #[tokio::test]

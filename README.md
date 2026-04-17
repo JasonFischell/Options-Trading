@@ -7,7 +7,7 @@ The current vertical slice is designed around token-efficient Codex sessions:
 - scheduled batch scans instead of an always-on daemon
 - delayed or delayed-frozen snapshots before live data
 - a small watchlist first, then controlled expansion
-- guarded buy-write intent generation with stock-first paper routing behind explicit flags
+- guarded deep-ITM covered-call buy-write intent generation with stock-first paper routing behind explicit flags
 - IB Gateway as the default broker runtime for unattended or semi-attended scans
 - a starter universe constrained to `APPS,BTBT,DAWN,PTON,BB,NVTS` with a default `$1-$20` underlying filter
 
@@ -18,8 +18,8 @@ The Rust crate is organized around the runtime layers we want long term:
 - `config`: env-driven runtime, market-data, schedule, and guardrail settings
 - `market_data`: watchlist loading plus the replay-testable market-data boundary
 - `ibkr`: narrow Interactive Brokers adapter for connectivity, snapshots, positions, and chains
-- `strategy`: covered-call candidate evaluation and basic exit logic
-- `state`: portfolio summaries and buy-write order-intent guardrails
+- `strategy`: deep-ITM covered-call candidate evaluation and basic exit logic
+- `state`: portfolio summaries and deep-ITM buy-write order-intent guardrails
 - `execution`: guarded dry-run plus paper-only stock-first submission layer
 - `scanner`: end-to-end cycle orchestration and cycle-report generation
 - `scoring`: legacy/reference scoring math carried forward for parity work
@@ -29,8 +29,9 @@ The engine currently supports:
 - loading a starter universe from CSV or `IBKR_SYMBOLS`
 - connecting to IBKR and switching market-data modes
 - fetching account state, positions, underlying snapshots, option chains, and option quotes
-- ranking covered-call buy-write candidates with conservative liquidity filters
-- generating guarded buy-write order intents with paper-order metadata
+- ranking deep-ITM covered-call buy-write candidates using intrinsic-entry math adapted from the Python harness
+- keeping conservative liquidity checks on bid and spread even when delayed/frozen data is thin
+- generating guarded deep-ITM buy-write order intents with paper-order metadata
 - emitting a structured cycle report as JSON
 
 ## Development Roadmap
@@ -49,7 +50,7 @@ The engine currently supports:
 
 ### Phase C
 
-- Harden buy-write order construction
+- Harden deep-ITM buy-write order construction
 - Add paper-trading submission behind explicit flags
 - Reconcile fills, positions, and duplicate-symbol prevention
 
@@ -79,6 +80,8 @@ The engine currently supports:
 9. If localhost is restricted, add `127.0.0.1` to trusted IPs
 10. Run `cargo test`
 11. Run `cargo run -p ibkr-options-engine`
+
+The current screening defaults mirror the Python reference more closely for deep-ITM calls: `MIN_EXPIRY_DAYS=30`, `MAX_EXPIRY_DAYS=60`, `MIN_ITM_DEPTH_PCT=0.05`, `MIN_DOWNSIDE_BUFFER_PCT=0.12`, and `MIN_ANNUALIZED_YIELD_PCT=12`. Ranking now increases with both annualized return and ITM depth, while still scaling down higher-beta names.
 
 Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first and only advances the short call after fill reconciliation confirms covered shares. Live-money routing remains disabled.
 

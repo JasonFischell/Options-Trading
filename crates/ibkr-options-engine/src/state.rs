@@ -124,7 +124,7 @@ pub fn build_order_intents(
 
         intents.push(OrderIntent {
             symbol: candidate.symbol.clone(),
-            strategy: "buy-write covered call".to_string(),
+            strategy: "deep-ITM covered-call buy-write".to_string(),
             account: account.account.clone(),
             mode: if config.risk.enable_paper_orders
                 && !config.read_only
@@ -159,7 +159,7 @@ pub fn build_order_intents(
                     action: TradeAction::Sell,
                     symbol: candidate.symbol.clone(),
                     description: format!(
-                        "Sell 1 covered call {} {} {}",
+                        "Sell 1 deep-ITM covered call {} {} {}",
                         candidate.symbol, candidate.expiry, candidate.strike
                     ),
                     quantity: 1,
@@ -257,9 +257,10 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            strike_buffer_pct: 0.03,
+            itm_depth_pct: 0.03,
+            downside_buffer_pct: 0.15,
             annualized_yield_pct: 20.0,
-            max_profit_yield_pct: 5.0,
+            expiration_yield_pct: 5.0,
             score: 0.2,
         };
         let positions = vec![InventoryPosition {
@@ -304,9 +305,10 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            strike_buffer_pct: 0.03,
+            itm_depth_pct: 0.03,
+            downside_buffer_pct: 0.15,
             annualized_yield_pct: 20.0,
-            max_profit_yield_pct: 5.0,
+            expiration_yield_pct: 5.0,
             score: 0.2,
         };
         let second = ScoredOptionCandidate {

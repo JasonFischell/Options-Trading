@@ -93,10 +93,10 @@ pub struct StrategyConfig {
     pub min_expiry_days: i64,
     pub max_expiry_days: i64,
     pub min_annualized_yield_pct: f64,
-    pub min_strike_buffer_pct: f64,
+    pub min_itm_depth_pct: f64,
+    pub min_downside_buffer_pct: f64,
     pub min_option_bid: f64,
     pub max_option_spread_pct: f64,
-    pub max_short_call_delta: f64,
     pub profit_take_pct: f64,
     pub max_loss_pct: f64,
 }
@@ -105,13 +105,13 @@ impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
             default_beta: 1.5,
-            min_expiry_days: 14,
-            max_expiry_days: 21,
+            min_expiry_days: 30,
+            max_expiry_days: 60,
             min_annualized_yield_pct: 12.0,
-            min_strike_buffer_pct: 0.01,
+            min_itm_depth_pct: 0.05,
+            min_downside_buffer_pct: 0.12,
             min_option_bid: 0.15,
             max_option_spread_pct: 0.25,
-            max_short_call_delta: 0.35,
             profit_take_pct: 0.5,
             max_loss_pct: 0.1,
         }
@@ -233,12 +233,18 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MIN_ANNUALIZED_YIELD_PCT must be numeric")?,
-                min_strike_buffer_pct: env_or_default(
-                    "MIN_STRIKE_BUFFER_PCT",
-                    &defaults.min_strike_buffer_pct.to_string(),
+                min_itm_depth_pct: env_or_default(
+                    "MIN_ITM_DEPTH_PCT",
+                    &defaults.min_itm_depth_pct.to_string(),
                 )?
                 .parse()
-                .context("MIN_STRIKE_BUFFER_PCT must be numeric")?,
+                .context("MIN_ITM_DEPTH_PCT must be numeric")?,
+                min_downside_buffer_pct: env_or_default(
+                    "MIN_DOWNSIDE_BUFFER_PCT",
+                    &defaults.min_downside_buffer_pct.to_string(),
+                )?
+                .parse()
+                .context("MIN_DOWNSIDE_BUFFER_PCT must be numeric")?,
                 min_option_bid: env_or_default(
                     "MIN_OPTION_BID",
                     &defaults.min_option_bid.to_string(),
@@ -251,12 +257,6 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MAX_OPTION_SPREAD_PCT must be numeric")?,
-                max_short_call_delta: env_or_default(
-                    "MAX_SHORT_CALL_DELTA",
-                    &defaults.max_short_call_delta.to_string(),
-                )?
-                .parse()
-                .context("MAX_SHORT_CALL_DELTA must be numeric")?,
                 profit_take_pct: env_or_default(
                     "PROFIT_TAKE_PCT",
                     &defaults.profit_take_pct.to_string(),
