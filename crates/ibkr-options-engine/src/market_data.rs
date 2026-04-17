@@ -118,6 +118,22 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             }
         };
 
+        if reference_price < config.risk.min_underlying_price
+            || reference_price > config.risk.max_underlying_price
+        {
+            info!(
+                symbol = %record.symbol,
+                reference_price,
+                min_underlying_price = config.risk.min_underlying_price,
+                max_underlying_price = config.risk.max_underlying_price,
+                "skipping option-chain fetch because underlying price is outside configured range"
+            );
+            return Ok(Some(SymbolMarketSnapshot {
+                underlying,
+                option_quotes: Vec::new(),
+            }));
+        }
+
         let contract_id = resolve_primary_stock_contract_id(&self.client, &record.symbol).await?;
         let chains =
             request_option_chain_for_underlying(&self.client, &record.symbol, contract_id).await?;

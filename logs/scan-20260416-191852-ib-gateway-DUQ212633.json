@@ -1,0 +1,39 @@
+{
+  "started_at": "2026-04-17T01:18:48.144495500Z",
+  "completed_at": "2026-04-17T01:18:52.904208200Z",
+  "run_mode": "Manual",
+  "schedule": "0 45 9,12,15 * * MON-FRI",
+  "market_data_mode": "Live",
+  "universe_size": 1,
+  "symbols_scanned": 1,
+  "underlying_snapshots": 1,
+  "option_quotes_considered": 0,
+  "candidates_ranked": 0,
+  "guardrail_rejections": [],
+  "proposed_orders": [],
+  "execution_records": [
+    {
+      "symbol": "N/A",
+      "status": "noop",
+      "submission_mode": "dry-run",
+      "note": "no order intents passed all guardrails in this cycle",
+      "legs": [],
+      "fill_reconciliation": null
+    }
+  ],
+  "open_positions": [],
+  "live_data_requested": true,
+  "non_live_symbols": [],
+  "warnings": [],
+  "action_log": [
+    "Loaded 1 symbols for a manual scan in read-only mode against IB Gateway.",
+    "APPS: underlying reference Some(3.8604) from realtime-or-frozen.",
+    "N/A: execution record status=noop mode=dry-run note=no order intents passed all guardrails in this cycle"
+  ],
+  "human_log_path": null,
+  "notes": [
+    "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits.",
+    "IB Gateway remains the default broker platform; switch to TWS by setting IBKR_PLATFORM=tws and letting the platform-specific default port follow unless you intentionally override IBKR_PORT.",
+    "Deep-ITM covered-call buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
+  ]
+}
