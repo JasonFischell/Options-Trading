@@ -164,7 +164,7 @@ where
         execution_records,
         open_positions,
         notes: vec![
-            "Scanner currently prefers delayed/frozen snapshots over long-lived subscriptions."
+            "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits."
                 .to_string(),
             if config.risk.enable_paper_orders
                 && matches!(config.mode, crate::config::RuntimeMode::Paper)
