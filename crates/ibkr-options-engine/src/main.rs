@@ -29,11 +29,15 @@ async fn main() -> Result<()> {
         client_id = config.client_id,
         account = %config.account,
         read_only = config.read_only,
+        universe_source = %config.universe_source_label(),
         symbols = ?plan.symbols,
         run_mode = plan.run_mode,
         execution_mode = plan.execution_mode,
         "loaded IBKR engine configuration"
     );
+    for startup_warning in &config.startup_warnings {
+        warn!("{startup_warning}");
+    }
     info!("{}", config.connection_guidance());
 
     if !config.connect_on_start {

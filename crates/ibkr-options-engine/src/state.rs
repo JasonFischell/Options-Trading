@@ -204,6 +204,7 @@ mod tests {
             market_data_mode: MarketDataMode::DelayedFrozen,
             universe_file: None,
             symbols: vec!["AAPL".to_string()],
+            startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
         }

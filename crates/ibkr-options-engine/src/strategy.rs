@@ -95,6 +95,18 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
+    if itm_depth_pct > config.max_itm_depth_pct {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!(
+                "ITM depth {:.2}% exceeds configured maximum {:.2}%",
+                itm_depth_pct * 100.0,
+                config.max_itm_depth_pct * 100.0
+            ),
+        });
+    }
+
     if itm_depth_pct < config.min_itm_depth_pct {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
@@ -249,7 +261,7 @@ mod tests {
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
-            min_itm_depth_pct: 0.01,
+            min_itm_depth_pct: 0.0,
             min_downside_buffer_pct: 0.01,
             ..StrategyConfig::default()
         };
@@ -305,7 +317,7 @@ mod tests {
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
-            min_itm_depth_pct: 0.01,
+            min_itm_depth_pct: 0.0,
             min_downside_buffer_pct: 0.01,
             ..StrategyConfig::default()
         };
@@ -424,6 +436,64 @@ mod tests {
     }
 
     #[test]
+    fn rejects_calls_that_are_too_deep_itm() {
+        let record = UniverseRecord {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "AAPL".to_string(),
+            price: 100.0,
+            bid: Some(99.9),
+            ask: Some(100.1),
+            last: Some(100.0),
+            close: Some(99.5),
+            implied_volatility: None,
+            beta: Some(1.1),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "AAPL".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 40.0,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(60.5),
+            ask: Some(60.8),
+            last: Some(60.6),
+            close: Some(60.4),
+            option_price: Some(60.6),
+            implied_volatility: Some(0.2),
+            delta: Some(0.99),
+            underlying_price: Some(100.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
+        };
+
+        let rejection = evaluate_buy_write_candidate(
+            &record,
+            &underlying,
+            &option,
+            &StrategyConfig {
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                min_annualized_yield_pct: 0.01,
+                min_expiration_profit_per_share: 0.01,
+                min_itm_depth_pct: 0.0,
+                max_itm_depth_pct: 0.50,
+                min_downside_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(rejection.reason.contains("configured maximum"));
+    }
+
+    #[test]
     fn rejects_calls_with_too_little_absolute_expiration_profit() {
         let record = UniverseRecord {
             symbol: "BTBT".to_string(),
@@ -446,16 +516,16 @@ mod tests {
         let option = OptionQuoteSnapshot {
             symbol: "BTBT".to_string(),
             expiry: "20991217".to_string(),
-            strike: 0.5,
+            strike: 1.0,
             right: "C".to_string(),
             exchange: "SMART".to_string(),
             trading_class: "BTBT".to_string(),
             multiplier: "100".to_string(),
-            bid: Some(1.04),
-            ask: Some(1.06),
-            last: Some(1.05),
-            close: Some(1.04),
-            option_price: Some(1.05),
+            bid: Some(0.53),
+            ask: Some(0.55),
+            last: Some(0.54),
+            close: Some(0.53),
+            option_price: Some(0.54),
             implied_volatility: Some(0.7),
             delta: Some(0.95),
             underlying_price: Some(1.53),
@@ -472,7 +542,7 @@ mod tests {
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.05,
-                min_itm_depth_pct: 0.01,
+                min_itm_depth_pct: 0.0,
                 min_downside_buffer_pct: 0.01,
                 ..StrategyConfig::default()
             },

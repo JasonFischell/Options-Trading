@@ -102,6 +102,7 @@ pub struct StrategyConfig {
     pub min_annualized_yield_pct: f64,
     pub min_expiration_profit_per_share: f64,
     pub min_itm_depth_pct: f64,
+    pub max_itm_depth_pct: f64,
     pub min_downside_buffer_pct: f64,
     pub min_option_bid: f64,
     pub max_option_spread_pct: f64,
@@ -115,7 +116,8 @@ impl Default for StrategyConfig {
             max_expiry_days: 60,
             min_annualized_yield_pct: 12.0,
             min_expiration_profit_per_share: 0.05,
-            min_itm_depth_pct: 0.08,
+            min_itm_depth_pct: 0.0,
+            max_itm_depth_pct: 0.50,
             min_downside_buffer_pct: 0.12,
             min_option_bid: 0.08,
             max_option_spread_pct: 0.25,
@@ -167,6 +169,7 @@ pub struct AppConfig {
     pub market_data_mode: MarketDataMode,
     pub universe_file: Option<String>,
     pub symbols: Vec<String>,
+    pub startup_warnings: Vec<String>,
     pub strategy: StrategyConfig,
     pub risk: RiskConfig,
 }
@@ -189,13 +192,44 @@ impl AppConfig {
         let run_mode = RunMode::parse(&env_or_default("RUN_MODE", "manual")?)?;
         let scan_schedule = env_or_default("SCAN_SCHEDULE", "0 45 9,12,15 * * MON-FRI")?;
         let market_data_mode = MarketDataMode::parse(&env_or_default("MARKET_DATA_MODE", "live")?)?;
-        let universe_file = optional_env("UNIVERSE_FILE");
-        let symbols = optional_env("IBKR_SYMBOLS")
-            .map(|value| parse_symbols(&value))
+        let raw_universe_file = raw_optional_env("UNIVERSE_FILE");
+        let raw_symbols = raw_optional_env("IBKR_SYMBOLS");
+        let universe_file = normalize_optional_env(raw_universe_file.as_deref());
+        let symbols = raw_symbols
+            .as_deref()
+            .map(parse_symbols)
             .unwrap_or_default();
+        let mut startup_warnings = Vec::new();
+
+        if raw_universe_file
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            startup_warnings.push(
+                "UNIVERSE_FILE was set blank, so CSV universe loading is explicitly disabled for this run."
+                    .to_string(),
+            );
+        }
+        if raw_symbols
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            startup_warnings.push(
+                "IBKR_SYMBOLS was set blank, so env-symbol universe loading is explicitly disabled for this run."
+                    .to_string(),
+            );
+        }
+        if !symbols.is_empty() && universe_file.is_some() {
+            startup_warnings.push(format!(
+                "Both IBKR_SYMBOLS and UNIVERSE_FILE were set; IBKR_SYMBOLS will override {} for this run.",
+                universe_file.as_deref().unwrap_or("the configured CSV universe")
+            ));
+        }
 
         if symbols.is_empty() && universe_file.is_none() {
-            anyhow::bail!("set IBKR_SYMBOLS or UNIVERSE_FILE before starting the scanner");
+            anyhow::bail!(
+                "set a non-blank IBKR_SYMBOLS or UNIVERSE_FILE before starting the scanner"
+            );
         }
 
         let defaults = StrategyConfig::default();
@@ -215,6 +249,7 @@ impl AppConfig {
             market_data_mode,
             universe_file,
             symbols,
+            startup_warnings,
             strategy: StrategyConfig {
                 default_beta: env_or_default("DEFAULT_BETA", &defaults.default_beta.to_string())?
                     .parse()
@@ -249,6 +284,12 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MIN_ITM_DEPTH_PCT must be numeric")?,
+                max_itm_depth_pct: env_or_default(
+                    "MAX_ITM_DEPTH_PCT",
+                    &defaults.max_itm_depth_pct.to_string(),
+                )?
+                .parse()
+                .context("MAX_ITM_DEPTH_PCT must be numeric")?,
                 min_downside_buffer_pct: env_or_default(
                     "MIN_DOWNSIDE_BUFFER_PCT",
                     &defaults.min_downside_buffer_pct.to_string(),
@@ -334,6 +375,16 @@ impl AppConfig {
     pub fn prefers_live_market_data(&self) -> bool {
         matches!(self.market_data_mode, MarketDataMode::Live)
     }
+
+    pub fn universe_source_label(&self) -> String {
+        if !self.symbols.is_empty() {
+            "env-symbols".to_string()
+        } else if let Some(universe_file) = &self.universe_file {
+            format!("csv:{universe_file}")
+        } else {
+            "disabled".to_string()
+        }
+    }
 }
 
 fn env_var(key: &str) -> Result<String> {
@@ -345,8 +396,15 @@ fn env_or_default(key: &str, default: &str) -> Result<String> {
 }
 
 fn optional_env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
+    normalize_optional_env(raw_optional_env(key).as_deref())
+}
+
+fn raw_optional_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+fn normalize_optional_env(value: Option<&str>) -> Option<String> {
+    value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }

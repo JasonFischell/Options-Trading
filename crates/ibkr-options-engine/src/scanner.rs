@@ -445,6 +445,7 @@ mod tests {
             market_data_mode: MarketDataMode::DelayedFrozen,
             universe_file: None,
             symbols: vec!["AAPL".to_string()],
+            startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
@@ -466,7 +467,9 @@ mod tests {
     }
 
     fn test_ledger_dir() -> PathBuf {
-        std::env::temp_dir().join("ibkr-options-engine-tests").join("paper-state")
+        std::env::temp_dir()
+            .join("ibkr-options-engine-tests")
+            .join("paper-state")
     }
 
     fn set_test_ledger_dir() {

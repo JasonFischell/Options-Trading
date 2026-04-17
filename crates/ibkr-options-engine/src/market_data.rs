@@ -13,8 +13,9 @@ use crate::{
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
         fetch_positions, is_invalid_option_contract_error, log_server_time, market_data_mode_label,
-        request_option_chain_for_underlying, request_option_quote, request_underlying_snapshot,
-        resolve_primary_stock_contract_id, select_buy_write_contracts, switch_market_data_mode,
+        request_option_chain_for_underlying, request_option_quote,
+        request_underlying_snapshot_for_contract, resolve_primary_stock_contract,
+        select_buy_write_contracts, switch_market_data_mode,
     },
     models::{
         AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord,
@@ -76,7 +77,13 @@ impl MarketDataProvider for IbkrMarketDataProvider {
         config: &AppConfig,
     ) -> Result<Option<SymbolMarketSnapshot>> {
         switch_market_data_mode(&self.client, config.market_data_mode).await?;
-        let mut underlying = request_underlying_snapshot(&self.client, &record.symbol).await?;
+        let primary_contract = resolve_primary_stock_contract(&self.client, &record.symbol).await?;
+        let mut underlying = request_underlying_snapshot_for_contract(
+            &self.client,
+            &record.symbol,
+            &primary_contract,
+        )
+        .await?;
         if matches!(config.market_data_mode, MarketDataMode::Live)
             && underlying.reference_price().is_none()
             && delayed_retry_available(&underlying.market_data_notices)
@@ -86,7 +93,12 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                 "live underlying snapshot was unavailable; retrying once with delayed market data"
             );
             switch_market_data_mode(&self.client, MarketDataMode::Delayed).await?;
-            underlying = request_underlying_snapshot(&self.client, &record.symbol).await?;
+            underlying = request_underlying_snapshot_for_contract(
+                &self.client,
+                &record.symbol,
+                &primary_contract,
+            )
+            .await?;
             underlying.market_data_notices.push(
                 "scanner retried with delayed market data after the live request returned no usable underlying price"
                     .to_string(),
@@ -141,12 +153,15 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             }));
         }
 
-        let contract_id = resolve_primary_stock_contract_id(&self.client, &record.symbol).await?;
-        let chains =
-            request_option_chain_for_underlying(&self.client, &record.symbol, contract_id).await?;
+        let chains = request_option_chain_for_underlying(
+            &self.client,
+            &record.symbol,
+            primary_contract.contract_id,
+        )
+        .await?;
         info!(
             symbol = %record.symbol,
-            underlying_contract_id = contract_id,
+            underlying_contract_id = primary_contract.contract_id,
             chain_response_count = chains.len(),
             expiration_count = chains.iter().map(|chain| chain.expirations.len()).sum::<usize>(),
             strike_count = chains.iter().map(|chain| chain.strikes.len()).sum::<usize>(),
@@ -165,7 +180,7 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                     reference_price,
                     requested_market_data_mode = %market_data_mode_label(config.market_data_mode),
                     error = %error,
-                    "unable to select deep-ITM buy-write option contracts from IBKR chain"
+                    "unable to select covered-call option contracts from the configured strike window"
                 );
                 return Ok(Some(SymbolMarketSnapshot {
                     underlying,
@@ -212,6 +227,18 @@ fn delayed_retry_available(notices: &[String]) -> bool {
 }
 
 pub fn load_universe(config: &AppConfig) -> Result<Vec<UniverseRecord>> {
+    if !config.symbols.is_empty() {
+        return Ok(config
+            .symbols
+            .iter()
+            .take(config.risk.max_underlyings_per_cycle)
+            .map(|symbol| UniverseRecord {
+                symbol: symbol.clone(),
+                beta: config.strategy.default_beta,
+            })
+            .collect());
+    }
+
     if let Some(universe_file) = &config.universe_file {
         let mut records = load_universe_from_csv(universe_file, config)?;
         if records.is_empty() {
@@ -221,15 +248,7 @@ pub fn load_universe(config: &AppConfig) -> Result<Vec<UniverseRecord>> {
         return Ok(records);
     }
 
-    Ok(config
-        .symbols
-        .iter()
-        .take(config.risk.max_underlyings_per_cycle)
-        .map(|symbol| UniverseRecord {
-            symbol: symbol.clone(),
-            beta: config.strategy.default_beta,
-        })
-        .collect())
+    anyhow::bail!("no enabled universe source is available for this run")
 }
 
 fn load_universe_from_csv(path: &str, config: &AppConfig) -> Result<Vec<UniverseRecord>> {
@@ -372,6 +391,7 @@ mod tests {
             market_data_mode: MarketDataMode::DelayedFrozen,
             universe_file: None,
             symbols: vec!["AAPL".to_string(), "MSFT".to_string()],
+            startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
         };

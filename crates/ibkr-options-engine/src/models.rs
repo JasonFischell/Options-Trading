@@ -42,6 +42,13 @@ impl UnderlyingSnapshot {
     }
 }
 
+fn observed_data_origin(diagnostics: &[String]) -> Option<&str> {
+    diagnostics
+        .iter()
+        .find_map(|diagnostic| diagnostic.strip_prefix("observed data origin: "))
+        .map(str::trim)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionQuoteSnapshot {
     pub symbol: String,
@@ -122,9 +129,14 @@ impl OptionQuoteSnapshot {
     }
 
     pub fn is_non_live(&self) -> bool {
+        if let Some(origin) = observed_data_origin(&self.diagnostics) {
+            return origin.contains("delayed");
+        }
+
         self.diagnostics.iter().any(|diagnostic| {
-            let diagnostic = diagnostic.to_ascii_lowercase();
-            diagnostic.contains("delayed") || diagnostic.contains("frozen")
+            diagnostic
+                .to_ascii_lowercase()
+                .contains("delayed market data")
         })
     }
 }
@@ -328,4 +340,54 @@ pub struct CycleReport {
     pub action_log: Vec<String>,
     pub human_log_path: Option<String>,
     pub notes: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OptionQuoteSnapshot;
+
+    fn quote_with_diagnostics(diagnostics: &[&str]) -> OptionQuoteSnapshot {
+        OptionQuoteSnapshot {
+            symbol: "MARA".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 1.0,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "MARA".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(1.0),
+            ask: Some(1.1),
+            last: Some(1.05),
+            close: Some(1.0),
+            option_price: Some(1.05),
+            implied_volatility: None,
+            delta: None,
+            underlying_price: Some(10.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: diagnostics
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn treats_realtime_or_frozen_option_quotes_as_live_enough() {
+        let quote = quote_with_diagnostics(&[
+            "observed tick types: Close, Bid, Ask",
+            "observed data origin: realtime-or-frozen",
+        ]);
+
+        assert!(!quote.is_non_live());
+    }
+
+    #[test]
+    fn treats_delayed_option_quotes_as_non_live() {
+        let quote = quote_with_diagnostics(&[
+            "10167: Requested market data is not subscribed. Displaying delayed market data.",
+            "observed data origin: delayed-or-delayed-frozen",
+        ]);
+
+        assert!(quote.is_non_live());
+    }
 }

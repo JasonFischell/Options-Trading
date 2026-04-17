@@ -91,6 +91,13 @@ pub struct SelectedOptionContract {
     pub chain_metadata: Vec<OptionChainMetadata>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptionResolutionCandidate {
+    exchange: String,
+    trading_class: String,
+    multiplier: String,
+}
+
 pub async fn log_server_time(client: &Client) -> Result<()> {
     let server_time = client
         .server_time()
@@ -180,6 +187,12 @@ pub async fn fetch_positions(client: &Client) -> Result<Vec<InventoryPosition>> 
 }
 
 pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) -> Result<i32> {
+    Ok(resolve_primary_stock_contract(client, symbol)
+        .await?
+        .contract_id)
+}
+
+pub async fn resolve_primary_stock_contract(client: &Client, symbol: &str) -> Result<Contract> {
     let contract = Contract {
         symbol: Symbol::from(symbol),
         security_type: SecurityType::Stock,
@@ -197,7 +210,24 @@ pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) ->
         .first()
         .with_context(|| format!("no stock contract details returned for {symbol}"))?;
 
-    Ok(primary.contract.contract_id)
+    Ok(Contract {
+        contract_id: primary.contract.contract_id,
+        symbol: primary.contract.symbol.clone(),
+        security_type: primary.contract.security_type.clone(),
+        last_trade_date_or_contract_month: primary
+            .contract
+            .last_trade_date_or_contract_month
+            .clone(),
+        strike: primary.contract.strike,
+        right: primary.contract.right.clone(),
+        multiplier: primary.contract.multiplier.clone(),
+        exchange: primary.contract.exchange.clone(),
+        primary_exchange: primary.contract.primary_exchange.clone(),
+        currency: primary.contract.currency.clone(),
+        local_symbol: primary.contract.local_symbol.clone(),
+        trading_class: primary.contract.trading_class.clone(),
+        ..Default::default()
+    })
 }
 
 pub async fn request_option_chain_for_underlying(
@@ -347,9 +377,16 @@ pub async fn request_underlying_snapshot(
     client: &Client,
     symbol: &str,
 ) -> Result<UnderlyingSnapshot> {
-    let contract = Contract::stock(symbol).build();
-    let snapshot =
-        request_snapshot(client, &contract, &["258"], &format!("{symbol} underlying")).await?;
+    let contract = resolve_primary_stock_contract(client, symbol).await?;
+    request_underlying_snapshot_for_contract(client, symbol, &contract).await
+}
+
+pub async fn request_underlying_snapshot_for_contract(
+    client: &Client,
+    symbol: &str,
+    contract: &Contract,
+) -> Result<UnderlyingSnapshot> {
+    let snapshot = request_snapshot(client, contract, &[], &format!("{symbol} underlying")).await?;
     let price = snapshot
         .last
         .or(snapshot.close)
@@ -369,7 +406,7 @@ pub async fn request_underlying_snapshot(
         last: snapshot.last,
         close: snapshot.close,
         implied_volatility: snapshot.implied_volatility,
-        beta: snapshot.beta,
+        beta: None,
         price_source: snapshot.data_origin_label().to_string(),
         market_data_notices: snapshot.diagnostics(),
     })
@@ -382,6 +419,7 @@ pub fn select_buy_write_contracts(
     config: &AppConfig,
 ) -> Result<Vec<SelectedOptionContract>> {
     let max_strike = reference_price * (1.0 - config.strategy.min_itm_depth_pct);
+    let min_strike = reference_price * (1.0 - config.strategy.max_itm_depth_pct);
     let mut candidates: Vec<SelectedOptionContract> = Vec::new();
     let mut total_expirations = 0usize;
     let mut expirations_in_window = 0usize;
@@ -406,13 +444,16 @@ pub fn select_buy_write_contracts(
                 .strikes
                 .iter()
                 .copied()
-                .filter(|strike| *strike > 0.0 && *strike <= max_strike)
+                .filter(|strike| {
+                    *strike > 0.0
+                        && *strike < reference_price
+                        && *strike >= min_strike
+                        && *strike <= max_strike
+                })
                 .collect::<Vec<_>>();
             strikes_in_window += strikes.len();
             strikes.sort_by(|left, right| {
-                (reference_price - right)
-                    .partial_cmp(&(reference_price - left))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
             });
 
             for strike in strikes
@@ -456,8 +497,9 @@ pub fn select_buy_write_contracts(
 
     candidates.sort_by(|left, right| {
         left.expiration.cmp(&right.expiration).then_with(|| {
-            (reference_price - right.strike)
-                .partial_cmp(&(reference_price - left.strike))
+            right
+                .strike
+                .partial_cmp(&left.strike)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
     });
@@ -465,7 +507,7 @@ pub fn select_buy_write_contracts(
 
     if candidates.is_empty() {
         anyhow::bail!(
-            "no deep-ITM buy-write option contracts matched for {symbol}; reference_price={reference_price:.2}, max_strike={max_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_at_or_below_max={}",
+            "no covered-call option contracts matched for {symbol}; reference_price={reference_price:.2}, min_strike={min_strike:.2}, max_strike={max_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_in_window={}",
             chains.len(),
             total_expirations,
             expirations_in_window,
@@ -498,20 +540,20 @@ pub async fn resolve_option_contract(
 ) -> Result<Contract> {
     let mut last_invalid_error = None;
 
-    for metadata in &selected.chain_metadata {
+    for candidate in option_resolution_candidates(selected) {
         let mut option_contract = Contract::option(
             &selected.symbol,
             &selected.expiration,
             selected.strike,
             &selected.right,
         );
-        option_contract.exchange = Exchange::from(if metadata.exchange.is_empty() {
+        option_contract.exchange = Exchange::from(if candidate.exchange.is_empty() {
             "SMART"
         } else {
-            metadata.exchange.as_str()
+            candidate.exchange.as_str()
         });
-        option_contract.trading_class = metadata.trading_class.clone();
-        option_contract.multiplier = metadata.multiplier.clone();
+        option_contract.trading_class = candidate.trading_class.clone();
+        option_contract.multiplier = candidate.multiplier.clone();
 
         let details = match client
             .contract_details(&option_contract)
@@ -523,8 +565,8 @@ pub async fn resolve_option_contract(
                     selected.expiration,
                     selected.strike,
                     selected.right,
-                    metadata.exchange,
-                    metadata.trading_class
+                    candidate.exchange,
+                    candidate.trading_class
                 )
             }) {
             Ok(details) => details,
@@ -542,8 +584,8 @@ pub async fn resolve_option_contract(
                 selected.expiration,
                 selected.strike,
                 selected.right,
-                metadata.exchange,
-                metadata.trading_class
+                candidate.exchange,
+                candidate.trading_class
             ));
             continue;
         };
@@ -577,6 +619,46 @@ pub async fn resolve_option_contract(
             selected.right
         )
     }))
+}
+
+fn option_resolution_candidates(
+    selected: &SelectedOptionContract,
+) -> Vec<OptionResolutionCandidate> {
+    let mut candidates = Vec::new();
+
+    for metadata in &selected.chain_metadata {
+        let smart_variant = OptionResolutionCandidate {
+            exchange: "SMART".to_string(),
+            trading_class: metadata.trading_class.clone(),
+            multiplier: metadata.multiplier.clone(),
+        };
+        if !candidates.contains(&smart_variant) {
+            candidates.push(smart_variant);
+        }
+
+        let direct_variant = OptionResolutionCandidate {
+            exchange: if metadata.exchange.is_empty() {
+                "SMART".to_string()
+            } else {
+                metadata.exchange.clone()
+            },
+            trading_class: metadata.trading_class.clone(),
+            multiplier: metadata.multiplier.clone(),
+        };
+        if !candidates.contains(&direct_variant) {
+            candidates.push(direct_variant);
+        }
+    }
+
+    if candidates.is_empty() {
+        candidates.push(OptionResolutionCandidate {
+            exchange: "SMART".to_string(),
+            trading_class: selected.symbol.clone(),
+            multiplier: "100".to_string(),
+        });
+    }
+
+    candidates
 }
 
 pub async fn request_option_quote(
@@ -752,7 +834,8 @@ pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        OptionChainSummary, SnapshotSummary, merge_snapshot_summary, normalize_market_price,
+        OptionChainMetadata, OptionChainSummary, SelectedOptionContract, SnapshotSummary,
+        merge_snapshot_summary, normalize_market_price, option_resolution_candidates,
         parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
@@ -760,7 +843,7 @@ mod tests {
     };
 
     #[test]
-    fn selects_deep_itm_contracts_on_earliest_expiration() {
+    fn selects_least_itm_contracts_first_within_the_allowed_window() {
         let chains = vec![OptionChainSummary {
             underlying_contract_id: 123,
             trading_class: "PTON".to_string(),
@@ -783,6 +866,7 @@ mod tests {
             market_data_mode: MarketDataMode::DelayedFrozen,
             universe_file: None,
             symbols: vec!["PTON".to_string()],
+            startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
@@ -799,9 +883,55 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].expiration, "20991217");
         assert_eq!(selected[0].right, "C");
-        assert_eq!(selected[0].strike, 4.0);
+        assert_eq!(selected[0].strike, 5.0);
+        assert_eq!(selected[1].strike, 4.5);
         assert_eq!(selected[0].chain_metadata.len(), 1);
         assert_eq!(selected[0].chain_metadata[0].trading_class, "PTON");
+    }
+
+    #[test]
+    fn excludes_strikes_below_half_the_reference_price() {
+        let chains = vec![OptionChainSummary {
+            underlying_contract_id: 123,
+            trading_class: "MARA".to_string(),
+            multiplier: "100".to_string(),
+            exchange: "SMART".to_string(),
+            expirations: vec!["20991217".to_string()],
+            strikes: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        }];
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
+            port: 4002,
+            client_id: 100,
+            account: "DU123456".to_string(),
+            mode: RuntimeMode::Paper,
+            read_only: true,
+            connect_on_start: false,
+            run_mode: RunMode::Manual,
+            scan_schedule: "manual".to_string(),
+            market_data_mode: MarketDataMode::DelayedFrozen,
+            universe_file: None,
+            symbols: vec!["MARA".to_string()],
+            startup_warnings: Vec::new(),
+            strategy: StrategyConfig {
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                ..StrategyConfig::default()
+            },
+            risk: RiskConfig {
+                max_option_quotes_per_underlying: 5,
+                ..RiskConfig::default()
+            },
+        };
+
+        let selected = select_buy_write_contracts("MARA", &chains, 6.0, &config).unwrap();
+        let strikes = selected
+            .into_iter()
+            .map(|contract| contract.strike)
+            .collect::<Vec<_>>();
+
+        assert_eq!(strikes, vec![5.0, 4.0, 3.0]);
     }
 
     #[test]
@@ -838,6 +968,7 @@ mod tests {
             market_data_mode: MarketDataMode::DelayedFrozen,
             universe_file: None,
             symbols: vec!["AAPL".to_string()],
+            startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
@@ -892,5 +1023,27 @@ mod tests {
     fn parses_beta_from_fundamental_ratios_snapshot_field() {
         let beta = parse_beta_from_fundamental_ratios("MKTCAP=1234.5;BETA=1.37;TTMREV=456.7");
         assert_eq!(beta, Some(1.37));
+    }
+
+    #[test]
+    fn prefers_smart_before_single_exchange_option_resolution() {
+        let selected = SelectedOptionContract {
+            symbol: "RGTI".to_string(),
+            right: "C".to_string(),
+            expiration: "20991217".to_string(),
+            strike: 1.0,
+            chain_metadata: vec![OptionChainMetadata {
+                exchange: "EDGX".to_string(),
+                trading_class: "RGTI".to_string(),
+                multiplier: "100".to_string(),
+                underlying_contract_id: 1,
+            }],
+        };
+
+        let candidates = option_resolution_candidates(&selected);
+
+        assert_eq!(candidates[0].exchange, "SMART");
+        assert_eq!(candidates[0].trading_class, "RGTI");
+        assert_eq!(candidates[1].exchange, "EDGX");
     }
 }
