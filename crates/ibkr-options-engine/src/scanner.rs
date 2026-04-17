@@ -77,7 +77,11 @@ where
             crate::config::RunMode::Manual => "manual",
             crate::config::RunMode::Scheduled => "scheduled",
         },
-        if config.read_only { "read-only" } else { "broker-connected" },
+        if config.read_only {
+            "read-only"
+        } else {
+            "broker-connected"
+        },
         config.platform.label()
     )];
 
@@ -213,9 +217,46 @@ where
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let (proposed_orders, risk_rejections, open_positions) =
+    let (mut proposed_orders, risk_rejections, open_positions) =
         build_order_intents(&account, &positions, &candidates, config);
     guardrail_rejections.extend(risk_rejections);
+
+    if config.risk.enable_paper_orders
+        && matches!(config.mode, crate::config::RuntimeMode::Paper)
+        && !config.read_only
+        && !config.risk.enable_live_orders
+    {
+        let blocked_symbols = proposed_orders
+            .iter()
+            .filter(|intent| non_live_symbols.contains(&intent.symbol))
+            .map(|intent| intent.symbol.clone())
+            .collect::<Vec<_>>();
+
+        if !blocked_symbols.is_empty() {
+            warnings.push(
+                "Paper submission was blocked for symbols that relied on delayed/frozen market data."
+                    .to_string(),
+            );
+        }
+
+        proposed_orders.retain(|intent| {
+            if non_live_symbols.contains(&intent.symbol) {
+                guardrail_rejections.push(GuardrailRejection {
+                    symbol: intent.symbol.clone(),
+                    stage: "paper-safety".to_string(),
+                    reason: "paper submission requires live market data for the underlying and candidate option quote"
+                        .to_string(),
+                });
+                action_log.push(format!(
+                    "{}: blocked before paper submission because delayed/frozen market data was observed in this cycle.",
+                    intent.symbol
+                ));
+                false
+            } else {
+                true
+            }
+        });
+    }
 
     let execution_records = executor.execute(&proposed_orders, config).await?;
     for intent in &proposed_orders {
@@ -442,5 +483,90 @@ mod tests {
 
         assert_eq!(report.candidates_ranked, 1);
         assert_eq!(report.proposed_orders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn blocks_paper_submission_when_candidate_uses_non_live_data() {
+        let mut config = test_config();
+        config.read_only = false;
+        config.market_data_mode = MarketDataMode::Live;
+        config.risk.enable_paper_orders = true;
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            "AAPL".to_string(),
+            SymbolMarketSnapshot {
+                underlying: UnderlyingSnapshot {
+                    symbol: "AAPL".to_string(),
+                    price: 100.0,
+                    bid: Some(99.9),
+                    ask: Some(100.1),
+                    last: Some(100.0),
+                    close: Some(99.5),
+                    implied_volatility: None,
+                    beta: Some(1.1),
+                    price_source: "delayed".to_string(),
+                    market_data_notices: vec![
+                        "10089: Delayed market data is available.".to_string(),
+                    ],
+                },
+                option_quotes: vec![OptionQuoteSnapshot {
+                    symbol: "AAPL".to_string(),
+                    expiry: "20991217".to_string(),
+                    strike: 90.0,
+                    right: "C".to_string(),
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    bid: Some(14.00),
+                    ask: Some(14.30),
+                    last: Some(14.10),
+                    close: Some(13.80),
+                    option_price: Some(14.10),
+                    implied_volatility: Some(0.2),
+                    delta: Some(0.8),
+                    underlying_price: Some(100.0),
+                    quote_source: Some("test".to_string()),
+                    diagnostics: vec![
+                        "observed data origin: delayed-or-delayed-frozen".to_string(),
+                    ],
+                }],
+            },
+        );
+
+        let executor = RecordingExecutor::default();
+        let report = run_scan_cycle(
+            &ReplayProvider {
+                account: AccountState {
+                    account: "DU123".to_string(),
+                    available_funds: Some(20_000.0),
+                    buying_power: Some(20_000.0),
+                    net_liquidation: Some(30_000.0),
+                },
+                positions: Vec::new(),
+                symbols,
+            },
+            &executor,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.candidates_ranked, 1);
+        assert!(report.proposed_orders.is_empty());
+        assert!(report.guardrail_rejections.iter().any(|rejection| {
+            rejection.symbol == "AAPL"
+                && rejection.stage == "paper-safety"
+                && rejection
+                    .reason
+                    .contains("paper submission requires live market data")
+        }));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Paper submission was blocked"))
+        );
+        assert_eq!(executor.recorded.lock().unwrap().len(), 0);
     }
 }
