@@ -117,6 +117,16 @@ pub fn evaluate_buy_write_candidate(
     }
 
     let expiration_profit = (option.strike - intrinsic_entry).max(0.0);
+    if expiration_profit < config.min_expiration_profit_per_share {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!(
+                "expiration profit {:.2} per share is below configured minimum {:.2}",
+                expiration_profit, config.min_expiration_profit_per_share
+            ),
+        });
+    }
     let expiration_yield_pct = (expiration_profit / intrinsic_entry) * 100.0;
     let annualized_yield_pct = expiration_yield_pct / (days_to_expiration as f64 / 365.0);
 
@@ -168,6 +178,7 @@ pub fn evaluate_buy_write_candidate(
         delta: option.delta,
         itm_depth_pct,
         downside_buffer_pct,
+        expiration_profit_per_share: expiration_profit,
         annualized_yield_pct,
         expiration_yield_pct,
         score,
@@ -275,6 +286,7 @@ mod tests {
             min_expiry_days: 1,
             max_expiry_days: 36500,
             min_annualized_yield_pct: 0.01,
+            min_expiration_profit_per_share: 0.01,
             min_itm_depth_pct: 0.01,
             min_downside_buffer_pct: 0.01,
             ..StrategyConfig::default()
@@ -385,6 +397,7 @@ mod tests {
                 min_expiry_days: 1,
                 max_expiry_days: 36500,
                 min_annualized_yield_pct: 0.01,
+                min_expiration_profit_per_share: 0.01,
                 min_itm_depth_pct: 0.05,
                 min_downside_buffer_pct: 0.01,
                 ..StrategyConfig::default()
@@ -393,6 +406,63 @@ mod tests {
         .unwrap_err();
 
         assert!(rejection.reason.contains("ITM depth"));
+    }
+
+    #[test]
+    fn rejects_calls_with_too_little_absolute_expiration_profit() {
+        let record = UniverseRecord {
+            symbol: "BTBT".to_string(),
+            beta: 1.2,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "BTBT".to_string(),
+            price: 1.53,
+            bid: Some(1.52),
+            ask: Some(1.54),
+            last: Some(1.53),
+            close: Some(1.50),
+            implied_volatility: None,
+            beta: Some(1.2),
+            price_source: "delayed-or-delayed-frozen".to_string(),
+            market_data_notices: vec!["observed data origin: delayed-or-delayed-frozen".to_string()],
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "BTBT".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 0.5,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "BTBT".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(1.04),
+            ask: Some(1.06),
+            last: Some(1.05),
+            close: Some(1.04),
+            option_price: Some(1.05),
+            implied_volatility: Some(0.7),
+            delta: Some(0.95),
+            underlying_price: Some(1.53),
+            quote_source: Some("default+model-fallback".to_string()),
+            diagnostics: vec!["observed data origin: delayed-or-delayed-frozen".to_string()],
+        };
+
+        let rejection = evaluate_buy_write_candidate(
+            &record,
+            &underlying,
+            &option,
+            &StrategyConfig {
+                min_expiry_days: 1,
+                max_expiry_days: 36500,
+                min_annualized_yield_pct: 0.01,
+                min_expiration_profit_per_share: 0.05,
+                min_itm_depth_pct: 0.01,
+                min_downside_buffer_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(rejection.reason.contains("expiration profit"));
     }
 
     #[test]

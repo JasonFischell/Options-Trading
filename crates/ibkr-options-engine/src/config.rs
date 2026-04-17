@@ -100,6 +100,7 @@ pub struct StrategyConfig {
     pub min_expiry_days: i64,
     pub max_expiry_days: i64,
     pub min_annualized_yield_pct: f64,
+    pub min_expiration_profit_per_share: f64,
     pub min_itm_depth_pct: f64,
     pub min_downside_buffer_pct: f64,
     pub min_option_bid: f64,
@@ -115,6 +116,7 @@ impl Default for StrategyConfig {
             min_expiry_days: 30,
             max_expiry_days: 60,
             min_annualized_yield_pct: 12.0,
+            min_expiration_profit_per_share: 0.05,
             min_itm_depth_pct: 0.05,
             min_downside_buffer_pct: 0.12,
             min_option_bid: 0.15,
@@ -239,6 +241,12 @@ impl AppConfig {
                 )?
                 .parse()
                 .context("MIN_ANNUALIZED_YIELD_PCT must be numeric")?,
+                min_expiration_profit_per_share: env_or_default(
+                    "MIN_EXPIRATION_PROFIT_PER_SHARE",
+                    &defaults.min_expiration_profit_per_share.to_string(),
+                )?
+                .parse()
+                .context("MIN_EXPIRATION_PROFIT_PER_SHARE must be numeric")?,
                 min_itm_depth_pct: env_or_default(
                     "MIN_ITM_DEPTH_PCT",
                     &defaults.min_itm_depth_pct.to_string(),

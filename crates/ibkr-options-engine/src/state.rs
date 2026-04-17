@@ -118,9 +118,7 @@ pub fn build_order_intents(
 
         let estimated_credit = candidate.option_bid * 100.0;
         let estimated_net_debit = estimated_stock_cost - estimated_credit;
-        let max_profit = ((candidate.strike - candidate.underlying_price).max(0.0)
-            + candidate.option_bid)
-            * 100.0;
+        let max_profit = candidate.expiration_profit_per_share * 100.0;
 
         intents.push(OrderIntent {
             symbol: candidate.symbol.clone(),
@@ -259,6 +257,7 @@ mod tests {
             delta: Some(0.25),
             itm_depth_pct: 0.03,
             downside_buffer_pct: 0.15,
+            expiration_profit_per_share: 5.0,
             annualized_yield_pct: 20.0,
             expiration_yield_pct: 5.0,
             score: 0.2,
@@ -307,6 +306,7 @@ mod tests {
             delta: Some(0.25),
             itm_depth_pct: 0.03,
             downside_buffer_pct: 0.15,
+            expiration_profit_per_share: 5.0,
             annualized_yield_pct: 20.0,
             expiration_yield_pct: 5.0,
             score: 0.2,

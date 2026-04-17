@@ -156,6 +156,7 @@ pub struct ScoredOptionCandidate {
     pub delta: Option<f64>,
     pub itm_depth_pct: f64,
     pub downside_buffer_pct: f64,
+    pub expiration_profit_per_share: f64,
     pub annualized_yield_pct: f64,
     pub expiration_yield_pct: f64,
     pub score: f64,

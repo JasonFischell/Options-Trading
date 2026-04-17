@@ -171,12 +171,13 @@ where
             ) {
                 Ok(candidate) => {
                     action_log.push(format!(
-                        "{}: accepted {} {:.2} expiring {} with annualized yield {:.2}% and score {:.4}.",
+                        "{}: accepted {} {:.2} expiring {} with annualized yield {:.2}%, expiration profit {:.2}/share, and score {:.4}.",
                         candidate.symbol,
                         candidate.right,
                         candidate.strike,
                         candidate.expiry,
                         candidate.annualized_yield_pct,
+                        candidate.expiration_profit_per_share,
                         candidate.score
                     ));
                     candidates.push(candidate)

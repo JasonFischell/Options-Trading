@@ -1,0 +1,103 @@
+{
+  "started_at": "2026-04-17T01:01:46.930741300Z",
+  "completed_at": "2026-04-17T01:03:40.796710400Z",
+  "run_mode": "Scheduled",
+  "schedule": "0 45 9,12,15 * * MON-FRI",
+  "market_data_mode": "Live",
+  "universe_size": 6,
+  "symbols_scanned": 6,
+  "underlying_snapshots": 6,
+  "option_quotes_considered": 6,
+  "candidates_ranked": 0,
+  "guardrail_rejections": [
+    {
+      "symbol": "BTBT",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "BTBT",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "BTBT",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "DAWN",
+      "stage": "prefilter",
+      "reason": "underlying price 21.50 is outside configured range 1.00-20.00"
+    },
+    {
+      "symbol": "PTON",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "PTON",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "PTON",
+      "stage": "strategy",
+      "reason": "option bid -1.00 below configured minimum 0.15"
+    },
+    {
+      "symbol": "BB",
+      "stage": "market-data",
+      "reason": "missing usable underlying price; ibkr notices: 10089: Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.Delayed market data is available.BB NYSE/TOP/ALL | observed data origin: unknown"
+    }
+  ],
+  "proposed_orders": [],
+  "execution_records": [
+    {
+      "symbol": "N/A",
+      "status": "noop",
+      "submission_mode": "dry-run",
+      "note": "no order intents passed all guardrails in this cycle",
+      "legs": [],
+      "fill_reconciliation": null
+    }
+  ],
+  "open_positions": [],
+  "live_data_requested": true,
+  "non_live_symbols": [
+    "BTBT",
+    "PTON"
+  ],
+  "warnings": [
+    "BTBT 20260522 0.50: option quote carried delayed/frozen diagnostics",
+    "BTBT 20260522 1.00: option quote carried delayed/frozen diagnostics",
+    "BTBT 20260529 0.50: option quote carried delayed/frozen diagnostics",
+    "PTON 20260522 0.50: option quote carried delayed/frozen diagnostics",
+    "PTON 20260522 1.00: option quote carried delayed/frozen diagnostics",
+    "PTON 20260522 1.50: option quote carried delayed/frozen diagnostics"
+  ],
+  "action_log": [
+    "Loaded 6 symbols for a scheduled scan in read-only mode against IB Gateway.",
+    "APPS: underlying reference Some(3.8604) from realtime-or-frozen.",
+    "BTBT: underlying reference Some(1.53) from realtime-or-frozen.",
+    "BTBT: rejected C 0.50 expiring 20260522 because option bid -1.00 below configured minimum 0.15.",
+    "BTBT: rejected C 1.00 expiring 20260522 because option bid -1.00 below configured minimum 0.15.",
+    "BTBT: rejected C 0.50 expiring 20260529 because option bid -1.00 below configured minimum 0.15.",
+    "DAWN: underlying reference Some(21.5) from realtime-or-frozen.",
+    "DAWN: rejected by underlying price filter at 21.50.",
+    "PTON: underlying reference Some(5.05) from realtime-or-frozen.",
+    "PTON: rejected C 0.50 expiring 20260522 because option bid -1.00 below configured minimum 0.15.",
+    "PTON: rejected C 1.00 expiring 20260522 because option bid -1.00 below configured minimum 0.15.",
+    "PTON: rejected C 1.50 expiring 20260522 because option bid -1.00 below configured minimum 0.15.",
+    "BB: underlying reference None from unknown.",
+    "BB: rejected before option screening because no usable underlying price was available.",
+    "NVTS: underlying reference Some(12.33) from realtime-or-frozen.",
+    "N/A: execution record status=noop mode=dry-run note=no order intents passed all guardrails in this cycle"
+  ],
+  "human_log_path": null,
+  "notes": [
+    "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits.",
+    "IB Gateway remains the default broker platform; switch to TWS by setting IBKR_PLATFORM=tws and letting the platform-specific default port follow unless you intentionally override IBKR_PORT.",
+    "Deep-ITM covered-call buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
+  ]
+}
