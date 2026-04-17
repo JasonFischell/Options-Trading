@@ -93,7 +93,13 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             );
             switch_market_data_mode(&self.client, config.market_data_mode).await?;
         }
-        underlying.beta = Some(record.beta);
+        if underlying.beta.is_none() && record.beta > 0.0 {
+            underlying.beta = Some(record.beta);
+            underlying.market_data_notices.push(
+                "underlying beta was unavailable from IBKR; falling back to configured universe beta"
+                    .to_string(),
+            );
+        }
 
         info!(
             symbol = %record.symbol,
@@ -103,6 +109,7 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             underlying_ask = ?underlying.ask,
             underlying_last = ?underlying.last,
             underlying_close = ?underlying.close,
+            underlying_beta = ?underlying.beta,
             underlying_reference_price = ?underlying.reference_price(),
             underlying_notices = ?underlying.market_data_notices,
             "captured IBKR underlying snapshot"

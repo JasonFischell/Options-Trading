@@ -154,7 +154,9 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    let beta = if record.beta > 0.0 {
+    let beta = if let Some(beta) = underlying.beta.filter(|beta| *beta > 0.0) {
+        beta
+    } else if record.beta > 0.0 {
         record.beta
     } else {
         config.default_beta
@@ -259,6 +261,59 @@ mod tests {
         assert!(candidate.annualized_yield_pct > 0.0);
         assert!(candidate.itm_depth_pct > 0.0);
         assert!(candidate.score > 0.0);
+    }
+
+    #[test]
+    fn prefers_underlying_beta_from_ibkr_snapshot_over_universe_fallback() {
+        let record = UniverseRecord {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+        };
+        let underlying = UnderlyingSnapshot {
+            symbol: "AAPL".to_string(),
+            price: 100.0,
+            bid: Some(99.9),
+            ask: Some(100.1),
+            last: Some(100.0),
+            close: Some(99.5),
+            implied_volatility: None,
+            beta: Some(2.0),
+            price_source: "realtime-or-frozen".to_string(),
+            market_data_notices: Vec::new(),
+        };
+        let option = OptionQuoteSnapshot {
+            symbol: "AAPL".to_string(),
+            expiry: "20991217".to_string(),
+            strike: 90.0,
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            bid: Some(14.00),
+            ask: Some(14.30),
+            last: Some(14.10),
+            close: Some(13.80),
+            option_price: Some(14.10),
+            implied_volatility: Some(0.25),
+            delta: Some(0.80),
+            underlying_price: Some(100.0),
+            quote_source: Some("test".to_string()),
+            diagnostics: Vec::new(),
+        };
+        let config = StrategyConfig {
+            min_expiry_days: 1,
+            max_expiry_days: 36500,
+            min_annualized_yield_pct: 0.01,
+            min_expiration_profit_per_share: 0.01,
+            min_itm_depth_pct: 0.01,
+            min_downside_buffer_pct: 0.01,
+            ..StrategyConfig::default()
+        };
+
+        let candidate =
+            evaluate_buy_write_candidate(&record, &underlying, &option, &config).unwrap();
+
+        assert_eq!(candidate.beta, 2.0);
     }
 
     #[test]

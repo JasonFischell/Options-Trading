@@ -53,6 +53,7 @@ pub struct SnapshotSummary {
     pub implied_volatility: Option<f64>,
     pub delta: Option<f64>,
     pub underlying_price: Option<f64>,
+    pub beta: Option<f64>,
     pub observed_tick_types: Vec<String>,
     pub notices: Vec<String>,
 }
@@ -318,6 +319,17 @@ pub async fn request_snapshot(
                     summary.underlying_price = computation.underlying_price;
                 }
             }
+            TickTypes::String(tick_string) => {
+                record_tick_type(&mut summary, &tick_string.tick_type);
+                if matches!(tick_string.tick_type, TickType::FundamentalRatios)
+                    && summary.beta.is_none()
+                {
+                    summary.beta = parse_beta_from_fundamental_ratios(&tick_string.value);
+                }
+            }
+            TickTypes::Generic(generic_tick) => {
+                record_tick_type(&mut summary, &generic_tick.tick_type);
+            }
             TickTypes::Notice(notice) => {
                 summary
                     .notices
@@ -337,7 +349,7 @@ pub async fn request_underlying_snapshot(
 ) -> Result<UnderlyingSnapshot> {
     let contract = Contract::stock(symbol).build();
     let snapshot =
-        request_snapshot(client, &contract, &[], &format!("{symbol} underlying")).await?;
+        request_snapshot(client, &contract, &["258"], &format!("{symbol} underlying")).await?;
     let price = snapshot
         .last
         .or(snapshot.close)
@@ -357,7 +369,7 @@ pub async fn request_underlying_snapshot(
         last: snapshot.last,
         close: snapshot.close,
         implied_volatility: snapshot.implied_volatility,
-        beta: None,
+        beta: snapshot.beta,
         price_source: snapshot.data_origin_label().to_string(),
         market_data_notices: snapshot.diagnostics(),
     })
@@ -649,6 +661,9 @@ fn merge_snapshot_summary(primary: &mut SnapshotSummary, fallback: SnapshotSumma
     if primary.underlying_price.is_none() {
         primary.underlying_price = fallback.underlying_price;
     }
+    if primary.beta.is_none() {
+        primary.beta = fallback.beta;
+    }
     primary.notices.extend(fallback.notices);
     for tick_type in fallback.observed_tick_types {
         if !primary
@@ -659,6 +674,17 @@ fn merge_snapshot_summary(primary: &mut SnapshotSummary, fallback: SnapshotSumma
             primary.observed_tick_types.push(tick_type);
         }
     }
+}
+
+fn parse_beta_from_fundamental_ratios(value: &str) -> Option<f64> {
+    value
+        .split(';')
+        .find_map(|entry| {
+            let (key, raw_value) = entry.split_once('=')?;
+            (key.trim().eq_ignore_ascii_case("beta")).then_some(raw_value.trim())
+        })
+        .and_then(|raw_value| raw_value.parse::<f64>().ok())
+        .filter(|beta| beta.is_finite() && *beta > 0.0)
 }
 
 fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickType, price: f64) {
@@ -727,7 +753,7 @@ pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
 mod tests {
     use super::{
         OptionChainSummary, SnapshotSummary, merge_snapshot_summary, normalize_market_price,
-        select_buy_write_contracts,
+        parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
         AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
@@ -860,5 +886,11 @@ mod tests {
         assert_eq!(normalize_market_price(-1.0), None);
         assert_eq!(normalize_market_price(0.0), None);
         assert_eq!(normalize_market_price(1.25), Some(1.25));
+    }
+
+    #[test]
+    fn parses_beta_from_fundamental_ratios_snapshot_field() {
+        let beta = parse_beta_from_fundamental_ratios("MKTCAP=1234.5;BETA=1.37;TTMREV=456.7");
+        assert_eq!(beta, Some(1.37));
     }
 }

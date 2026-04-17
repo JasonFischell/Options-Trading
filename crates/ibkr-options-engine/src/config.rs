@@ -115,9 +115,9 @@ impl Default for StrategyConfig {
             max_expiry_days: 60,
             min_annualized_yield_pct: 12.0,
             min_expiration_profit_per_share: 0.05,
-            min_itm_depth_pct: 0.05,
+            min_itm_depth_pct: 0.08,
             min_downside_buffer_pct: 0.12,
-            min_option_bid: 0.15,
+            min_option_bid: 0.08,
             max_option_spread_pct: 0.25,
         }
     }
