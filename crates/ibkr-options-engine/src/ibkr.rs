@@ -662,6 +662,10 @@ fn merge_snapshot_summary(primary: &mut SnapshotSummary, fallback: SnapshotSumma
 }
 
 fn update_snapshot_from_price(summary: &mut SnapshotSummary, tick_type: &TickType, price: f64) {
+    let Some(price) = normalize_market_price(price) else {
+        return;
+    };
+
     match tick_type {
         TickType::Bid | TickType::DelayedBid => summary.bid = Some(price),
         TickType::Ask | TickType::DelayedAsk => summary.ask = Some(price),
@@ -684,6 +688,10 @@ fn record_tick_type(summary: &mut SnapshotSummary, tick_type: &TickType) {
 
 fn update_snapshot_from_price_size(summary: &mut SnapshotSummary, tick: &TickPriceSize) {
     update_snapshot_from_price(summary, &tick.price_tick_type, tick.price);
+}
+
+fn normalize_market_price(price: f64) -> Option<f64> {
+    (price.is_finite() && price > 0.0).then_some(price)
 }
 
 impl SnapshotSummary {
@@ -718,7 +726,8 @@ pub fn market_data_mode_label(mode: MarketDataMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        OptionChainSummary, SnapshotSummary, merge_snapshot_summary, select_buy_write_contracts,
+        OptionChainSummary, SnapshotSummary, merge_snapshot_summary, normalize_market_price,
+        select_buy_write_contracts,
     };
     use crate::config::{
         AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
@@ -844,5 +853,12 @@ mod tests {
         assert_eq!(primary.ask, Some(0.2));
         assert_eq!(primary.option_price, Some(0.15));
         assert_eq!(primary.notices, vec!["primary", "fallback"]);
+    }
+
+    #[test]
+    fn normalizes_ibkr_sentinel_prices_to_none() {
+        assert_eq!(normalize_market_price(-1.0), None);
+        assert_eq!(normalize_market_price(0.0), None);
+        assert_eq!(normalize_market_price(1.25), Some(1.25));
     }
 }

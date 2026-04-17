@@ -4,6 +4,7 @@ use ibkr_options_engine::{
     config::AppConfig,
     execution::GuardedPaperOrderExecutor,
     market_data::{IbkrMarketDataProvider, load_universe},
+    reporting::write_cycle_outputs,
     scanner::{build_scan_plan, run_scan_cycle},
 };
 use tracing::{info, warn};
@@ -50,8 +51,21 @@ async fn main() -> Result<()> {
             )
         })?;
     let executor = GuardedPaperOrderExecutor::from_client(provider.shared_client());
-    let report = run_scan_cycle(&provider, &executor, &config).await?;
+    let mut report = run_scan_cycle(&provider, &executor, &config).await?;
+    let (human_log_path, json_report_path) = write_cycle_outputs(&config, &report)?;
+    report.human_log_path = Some(human_log_path.display().to_string());
+
+    info!(
+        human_log_path = %human_log_path.display(),
+        json_report_path = %json_report_path.display(),
+        "wrote scan artifacts"
+    );
     println!("{}", serde_json::to_string_pretty(&report)?);
+    println!(
+        "Human-readable log: {}\nJSON report: {}",
+        human_log_path.display(),
+        json_report_path.display()
+    );
 
     Ok(())
 }

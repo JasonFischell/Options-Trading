@@ -9,7 +9,7 @@ use regex::Regex;
 use tracing::{info, warn};
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, MarketDataMode},
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
         fetch_positions, is_invalid_option_contract_error, log_server_time, market_data_mode_label,
@@ -77,6 +77,22 @@ impl MarketDataProvider for IbkrMarketDataProvider {
     ) -> Result<Option<SymbolMarketSnapshot>> {
         switch_market_data_mode(&self.client, config.market_data_mode).await?;
         let mut underlying = request_underlying_snapshot(&self.client, &record.symbol).await?;
+        if matches!(config.market_data_mode, MarketDataMode::Live)
+            && underlying.reference_price().is_none()
+            && delayed_retry_available(&underlying.market_data_notices)
+        {
+            warn!(
+                symbol = %record.symbol,
+                "live underlying snapshot was unavailable; retrying once with delayed market data"
+            );
+            switch_market_data_mode(&self.client, MarketDataMode::Delayed).await?;
+            underlying = request_underlying_snapshot(&self.client, &record.symbol).await?;
+            underlying.market_data_notices.push(
+                "scanner retried with delayed market data after the live request returned no usable underlying price"
+                    .to_string(),
+            );
+            switch_market_data_mode(&self.client, config.market_data_mode).await?;
+        }
         underlying.beta = Some(record.beta);
 
         info!(
@@ -163,6 +179,13 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             option_quotes,
         }))
     }
+}
+
+fn delayed_retry_available(notices: &[String]) -> bool {
+    notices.iter().any(|notice| {
+        let notice = notice.to_ascii_lowercase();
+        notice.contains("delayed market data is available")
+    })
 }
 
 pub fn load_universe(config: &AppConfig) -> Result<Vec<UniverseRecord>> {
@@ -306,7 +329,7 @@ mod tests {
             StrategyConfig,
         },
         ibkr::{OptionChainMetadata, SelectedOptionContract},
-        market_data::{fetch_option_quotes_with, load_universe},
+        market_data::{delayed_retry_available, fetch_option_quotes_with, load_universe},
         models::OptionQuoteSnapshot,
     };
 
@@ -398,5 +421,13 @@ mod tests {
 
         assert_eq!(option_quotes.len(), 1);
         assert_eq!(option_quotes[0].strike, 102.0);
+    }
+
+    #[test]
+    fn detects_when_delayed_retry_is_available() {
+        assert!(delayed_retry_available(&[
+            "10089: Requested market data requires additional subscription for API. Delayed market data is available.".to_string()
+        ]));
+        assert!(!delayed_retry_available(&["observed data origin: unknown".to_string()]));
     }
 }

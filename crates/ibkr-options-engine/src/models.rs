@@ -36,6 +36,10 @@ impl UnderlyingSnapshot {
                 (None, None) => None,
             })
     }
+
+    pub fn is_non_live(&self) -> bool {
+        self.price_source.contains("delayed")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +119,13 @@ impl OptionQuoteSnapshot {
             return None;
         }
         Some((ask - bid) / midpoint)
+    }
+
+    pub fn is_non_live(&self) -> bool {
+        self.diagnostics.iter().any(|diagnostic| {
+            let diagnostic = diagnostic.to_ascii_lowercase();
+            diagnostic.contains("delayed") || diagnostic.contains("frozen")
+        })
     }
 }
 
@@ -313,5 +324,10 @@ pub struct CycleReport {
     pub proposed_orders: Vec<OrderIntent>,
     pub execution_records: Vec<ExecutionRecord>,
     pub open_positions: Vec<OpenPositionState>,
+    pub live_data_requested: bool,
+    pub non_live_symbols: Vec<String>,
+    pub warnings: Vec<String>,
+    pub action_log: Vec<String>,
+    pub human_log_path: Option<String>,
     pub notes: Vec<String>,
 }

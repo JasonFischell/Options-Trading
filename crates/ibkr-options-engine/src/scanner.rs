@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use std::collections::BTreeSet;
 
 use crate::{
     config::AppConfig,
@@ -67,6 +68,25 @@ where
     let mut symbols_scanned = 0usize;
     let mut underlying_snapshots = 0usize;
     let mut option_quotes_considered = 0usize;
+    let mut non_live_symbols = BTreeSet::new();
+    let mut warnings = Vec::new();
+    let mut action_log = vec![format!(
+        "Loaded {} symbols for a {} scan in {} mode against {}.",
+        universe.len(),
+        match config.run_mode {
+            crate::config::RunMode::Manual => "manual",
+            crate::config::RunMode::Scheduled => "scheduled",
+        },
+        if config.read_only { "read-only" } else { "broker-connected" },
+        config.platform.label()
+    )];
+
+    if !config.prefers_live_market_data() {
+        warnings.push(format!(
+            "Configured market data mode is {} instead of live; switch MARKET_DATA_MODE=live before relying on this scan for paper-trading decisions.",
+            crate::ibkr::market_data_mode_label(config.market_data_mode)
+        ));
+    }
 
     for record in &universe {
         symbols_scanned += 1;
@@ -76,10 +96,27 @@ where
                 stage: "market-data".to_string(),
                 reason: "no usable market data snapshot returned".to_string(),
             });
+            action_log.push(format!(
+                "{}: no market-data snapshot was returned by IBKR.",
+                record.symbol
+            ));
             continue;
         };
 
         underlying_snapshots += 1;
+        if snapshot.underlying.is_non_live() {
+            non_live_symbols.insert(record.symbol.clone());
+            warnings.push(format!(
+                "{} underlying snapshot used non-live data ({})",
+                record.symbol, snapshot.underlying.price_source
+            ));
+        }
+        action_log.push(format!(
+            "{}: underlying reference {:?} from {}.",
+            record.symbol,
+            snapshot.underlying.reference_price(),
+            snapshot.underlying.price_source
+        ));
         let Some(price) = snapshot.underlying.reference_price() else {
             let diagnostic_suffix = if snapshot.underlying.market_data_notices.is_empty() {
                 String::new()
@@ -94,6 +131,10 @@ where
                 stage: "market-data".to_string(),
                 reason: format!("missing usable underlying price{diagnostic_suffix}"),
             });
+            action_log.push(format!(
+                "{}: rejected before option screening because no usable underlying price was available.",
+                record.symbol
+            ));
             continue;
         };
 
@@ -106,18 +147,40 @@ where
                     price, config.risk.min_underlying_price, config.risk.max_underlying_price
                 ),
             });
+            action_log.push(format!(
+                "{}: rejected by underlying price filter at {:.2}.",
+                record.symbol, price
+            ));
             continue;
         }
 
         for option_quote in snapshot.option_quotes {
             option_quotes_considered += 1;
+            if option_quote.is_non_live() {
+                non_live_symbols.insert(record.symbol.clone());
+                warnings.push(format!(
+                    "{} {} {:.2}: option quote carried delayed/frozen diagnostics",
+                    option_quote.symbol, option_quote.expiry, option_quote.strike
+                ));
+            }
             match evaluate_buy_write_candidate(
                 record,
                 &snapshot.underlying,
                 &option_quote,
                 &config.strategy,
             ) {
-                Ok(candidate) => candidates.push(candidate),
+                Ok(candidate) => {
+                    action_log.push(format!(
+                        "{}: accepted {} {:.2} expiring {} with annualized yield {:.2}% and score {:.4}.",
+                        candidate.symbol,
+                        candidate.right,
+                        candidate.strike,
+                        candidate.expiry,
+                        candidate.annualized_yield_pct,
+                        candidate.score
+                    ));
+                    candidates.push(candidate)
+                }
                 Err(mut rejection) => {
                     if rejection.reason.contains("missing usable option premium")
                         && !option_quote.diagnostics.is_empty()
@@ -128,6 +191,14 @@ where
                             option_quote.diagnostics.join(" | ")
                         );
                     }
+                    action_log.push(format!(
+                        "{}: rejected {} {:.2} expiring {} because {}.",
+                        option_quote.symbol,
+                        option_quote.right,
+                        option_quote.strike,
+                        option_quote.expiry,
+                        rejection.reason
+                    ));
                     guardrail_rejections.push(rejection);
                 }
             }
@@ -146,6 +217,18 @@ where
     guardrail_rejections.extend(risk_rejections);
 
     let execution_records = executor.execute(&proposed_orders, config).await?;
+    for intent in &proposed_orders {
+        action_log.push(format!(
+            "{}: proposed {} with estimated net debit {:.2} and max profit {:.2}.",
+            intent.symbol, intent.strategy, intent.estimated_net_debit, intent.max_profit
+        ));
+    }
+    for execution in &execution_records {
+        action_log.push(format!(
+            "{}: execution record status={} mode={} note={}",
+            execution.symbol, execution.status, execution.submission_mode, execution.note
+        ));
+    }
     let completed_at = Utc::now();
 
     Ok(CycleReport {
@@ -163,9 +246,15 @@ where
         proposed_orders,
         execution_records,
         open_positions,
+        live_data_requested: config.prefers_live_market_data(),
+        non_live_symbols: non_live_symbols.into_iter().collect(),
+        warnings,
+        action_log,
+        human_log_path: None,
         notes: vec![
             "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits."
                 .to_string(),
+            "IB Gateway remains the default broker platform; switch to TWS by setting IBKR_PLATFORM=tws and letting the platform-specific default port follow unless you intentionally override IBKR_PORT.".to_string(),
             if config.risk.enable_paper_orders
                 && matches!(config.mode, crate::config::RuntimeMode::Paper)
                 && !config.read_only

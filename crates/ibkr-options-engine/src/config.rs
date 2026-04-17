@@ -49,6 +49,13 @@ impl BrokerPlatform {
             (Self::Tws, RuntimeMode::Live) => "7496",
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gateway => "IB Gateway",
+            Self::Tws => "TWS",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,8 +190,7 @@ impl AppConfig {
         let connect_on_start = parse_bool(&env_var("IBKR_CONNECT_ON_START")?)?;
         let run_mode = RunMode::parse(&env_or_default("RUN_MODE", "manual")?)?;
         let scan_schedule = env_or_default("SCAN_SCHEDULE", "0 45 9,12,15 * * MON-FRI")?;
-        let market_data_mode =
-            MarketDataMode::parse(&env_or_default("MARKET_DATA_MODE", "delayed-frozen")?)?;
+        let market_data_mode = MarketDataMode::parse(&env_or_default("MARKET_DATA_MODE", "live")?)?;
         let universe_file = optional_env("UNIVERSE_FILE");
         let symbols = optional_env("IBKR_SYMBOLS")
             .map(|value| parse_symbols(&value))
@@ -322,12 +328,16 @@ impl AppConfig {
 
     pub fn connection_guidance(&self) -> String {
         format!(
-            "Targeting {:?} {:?} at {}. Expected default port is {}. In IB Gateway, enable Configure > Settings > API > Settings > Enable ActiveX and Socket Clients, and allow localhost or add 127.0.0.1 to Trusted IPs if needed.",
-            self.platform,
+            "Targeting {} {:?} at {}. Expected default port is {}. Switch platforms by changing IBKR_PLATFORM between gateway and tws; the port will follow the selected platform unless IBKR_PORT overrides it. For IB Gateway, enable Configure > Settings > API > Settings > Enable ActiveX and Socket Clients, and allow localhost or add 127.0.0.1 to Trusted IPs if needed.",
+            self.platform.label(),
             self.mode,
             self.endpoint(),
             self.platform.expected_port_hint(self.mode)
         )
+    }
+
+    pub fn prefers_live_market_data(&self) -> bool {
+        matches!(self.market_data_mode, MarketDataMode::Live)
     }
 }
 
