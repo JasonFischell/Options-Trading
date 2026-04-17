@@ -356,7 +356,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -462,13 +462,30 @@ mod tests {
     }
 
     fn test_ledger_path(account: &str) -> std::path::PathBuf {
-        std::path::Path::new("logs").join(format!("paper-trade-state-{account}.json"))
+        test_ledger_dir().join(format!("paper-trade-state-{account}.json"))
+    }
+
+    fn test_ledger_dir() -> PathBuf {
+        std::env::temp_dir().join("ibkr-options-engine-tests").join("paper-state")
+    }
+
+    fn set_test_ledger_dir() {
+        let dir = test_ledger_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("IBKR_PAPER_STATE_DIR", &dir);
+        }
+    }
+
+    fn clear_test_ledger_dir(account: &str) {
+        let ledger_path = test_ledger_path(account);
+        let _ = std::fs::remove_file(&ledger_path);
     }
 
     #[tokio::test]
     async fn builds_one_ranked_candidate_and_order_intent() {
-        let ledger_path = test_ledger_path("DU123");
-        let _ = std::fs::remove_file(&ledger_path);
+        set_test_ledger_dir();
+        clear_test_ledger_dir("DU123");
 
         let mut symbols = HashMap::new();
         symbols.insert(
@@ -529,13 +546,13 @@ mod tests {
         assert_eq!(report.proposed_orders.len(), 1);
         assert!(report.paper_trade_lifecycle.is_empty());
 
-        let _ = std::fs::remove_file(ledger_path);
+        clear_test_ledger_dir("DU123");
     }
 
     #[tokio::test]
     async fn blocks_paper_submission_when_candidate_uses_non_live_data() {
-        let ledger_path = test_ledger_path("DU123");
-        let _ = std::fs::remove_file(&ledger_path);
+        set_test_ledger_dir();
+        clear_test_ledger_dir("DU123");
 
         let mut config = test_config();
         config.read_only = false;
@@ -619,11 +636,12 @@ mod tests {
         );
         assert_eq!(executor.recorded.lock().unwrap().len(), 0);
 
-        let _ = std::fs::remove_file(ledger_path);
+        clear_test_ledger_dir("DU123");
     }
 
     #[tokio::test]
     async fn blocks_duplicate_paper_intent_from_persisted_state() {
+        set_test_ledger_dir();
         let mut config = test_config();
         config.account = "DU123-IDEMPOTENT".to_string();
         config.read_only = false;
@@ -631,7 +649,7 @@ mod tests {
         config.risk.enable_paper_orders = true;
 
         let ledger_path = test_ledger_path(&config.account);
-        std::fs::create_dir_all("logs").unwrap();
+        clear_test_ledger_dir(&config.account);
         std::fs::write(
             &ledger_path,
             serde_json::json!({

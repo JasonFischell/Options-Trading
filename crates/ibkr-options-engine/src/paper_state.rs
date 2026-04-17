@@ -316,6 +316,10 @@ fn intent_key(intent: &OrderIntent) -> String {
 }
 
 fn ledger_path(config: &AppConfig) -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("IBKR_PAPER_STATE_DIR") {
+        return PathBuf::from(override_dir).join(format!("paper-trade-state-{}.json", config.account));
+    }
+
     Path::new("logs").join(format!("paper-trade-state-{}.json", config.account))
 }
 
