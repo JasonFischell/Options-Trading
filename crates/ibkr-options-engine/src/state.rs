@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-const COMBO_DEBIT_PRICE_IMPROVEMENT: f64 = 0.02;
+const COMBO_DEBIT_PRICE_OFFSET: f64 = 0.02;
 
 pub fn summarize_open_positions(positions: &[InventoryPosition]) -> Vec<OpenPositionState> {
     let mut by_symbol: BTreeMap<String, OpenPositionState> = BTreeMap::new();
@@ -100,13 +100,13 @@ pub fn build_order_intents(
         };
 
         let combo_limit_price =
-            round_to_cents(stock_ask - candidate.option_bid - COMBO_DEBIT_PRICE_IMPROVEMENT);
+            round_to_cents(stock_ask - candidate.option_bid + COMBO_DEBIT_PRICE_OFFSET);
         if combo_limit_price <= 0.0 {
             rejections.push(GuardrailRejection {
                 symbol: candidate.symbol.clone(),
                 stage: "pricing".to_string(),
                 reason: format!(
-                    "combo debit {:.2} is non-positive after applying the $0.02 price improvement",
+                    "combo debit {:.2} is non-positive after applying the $0.02 marketability offset",
                     combo_limit_price
                 ),
             });
@@ -526,8 +526,8 @@ mod tests {
 
         assert!(rejections.is_empty());
         assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].combo_limit_price, Some(86.08));
-        assert_eq!(intents[0].estimated_net_debit, 8_608.0);
+        assert_eq!(intents[0].combo_limit_price, Some(86.12));
+        assert_eq!(intents[0].estimated_net_debit, 8_612.0);
         assert_eq!(intents[0].legs[0].contract_id, Some(1001));
         assert_eq!(intents[0].legs[1].contract_id, Some(2001));
     }
