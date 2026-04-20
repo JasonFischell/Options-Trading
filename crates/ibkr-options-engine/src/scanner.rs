@@ -425,6 +425,8 @@ mod tests {
                     note: "recorded in test executor".to_string(),
                     legs: Vec::new(),
                     fill_reconciliation: None,
+                    broker_event_log_path: None,
+                    broker_event_timeline: Vec::new(),
                 })
                 .collect())
         }

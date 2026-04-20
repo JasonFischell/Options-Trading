@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{fs, path::Path, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ibapi::{
     contracts::{ComboLeg, ComboLegOpenClose},
     orders::{
@@ -15,8 +16,8 @@ use tokio::time::{Duration, timeout};
 use crate::{
     config::{AppConfig, RuntimeMode},
     models::{
-        ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, InstrumentType, OrderIntent,
-        OrderLegIntent, TradeAction,
+        BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord,
+        InstrumentType, OrderIntent, OrderLegIntent, TradeAction,
     },
 };
 
@@ -52,6 +53,8 @@ impl OrderExecutor for GuardedDryRunExecutor {
                 note: "no order intents passed all guardrails in this cycle".to_string(),
                 legs: Vec::new(),
                 fill_reconciliation: None,
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
             });
         }
 
@@ -68,10 +71,18 @@ enum BrokerOrderEvent {
 }
 
 #[derive(Debug, Clone)]
+struct TimedBrokerOrderEvent {
+    observed_at: DateTime<Utc>,
+    elapsed_ms: i64,
+    event: BrokerOrderEvent,
+}
+
+#[derive(Debug, Clone)]
 struct SubmittedOrderOutcome {
     order_id: i32,
     is_combo: bool,
-    events: Vec<BrokerOrderEvent>,
+    events: Vec<TimedBrokerOrderEvent>,
+    broker_event_log_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,8 +110,9 @@ trait BrokerOrderGateway {
         order_id: i32,
         contract: &Contract,
         order: &Order,
+        minimum_collection_window: Duration,
         idle_timeout: Duration,
-    ) -> Result<Vec<BrokerOrderEvent>>;
+    ) -> Result<Vec<TimedBrokerOrderEvent>>;
 }
 
 struct IbkrOrderGateway {
@@ -124,44 +136,51 @@ impl BrokerOrderGateway for IbkrOrderGateway {
         order_id: i32,
         contract: &Contract,
         order: &Order,
+        minimum_collection_window: Duration,
         idle_timeout: Duration,
-    ) -> Result<Vec<BrokerOrderEvent>> {
+    ) -> Result<Vec<TimedBrokerOrderEvent>> {
         let mut subscription = self
             .client
             .place_order(order_id, contract, order)
             .await
             .with_context(|| format!("failed to place IBKR order {order_id}"))?;
         let mut events = Vec::new();
+        let started = Instant::now();
 
         loop {
             let next_item = timeout(idle_timeout, subscription.next()).await;
             let next_stream_item = match next_item {
                 Ok(item) => item,
-                Err(_) => break,
+                Err(_) => {
+                    if started.elapsed() >= minimum_collection_window {
+                        break;
+                    }
+                    continue;
+                }
             };
 
             let Some(result) = next_stream_item else {
                 break;
             };
 
-            match result
+            let event = match result
                 .with_context(|| format!("failed while monitoring IBKR order {order_id}"))?
             {
-                PlaceOrder::OrderStatus(status) => {
-                    events.push(BrokerOrderEvent::OrderStatus(status))
-                }
-                PlaceOrder::ExecutionData(data) => {
-                    events.push(BrokerOrderEvent::ExecutionData(data))
-                }
-                PlaceOrder::CommissionReport(report) => {
-                    events.push(BrokerOrderEvent::CommissionReport(report))
-                }
-                PlaceOrder::Message(notice) => events.push(BrokerOrderEvent::Message {
+                PlaceOrder::OrderStatus(status) => BrokerOrderEvent::OrderStatus(status),
+                PlaceOrder::ExecutionData(data) => BrokerOrderEvent::ExecutionData(data),
+                PlaceOrder::CommissionReport(report) => BrokerOrderEvent::CommissionReport(report),
+                PlaceOrder::Message(notice) => BrokerOrderEvent::Message {
                     code: notice.code,
                     message: notice.message,
-                }),
-                PlaceOrder::OpenOrder(_) => {}
-            }
+                },
+                PlaceOrder::OpenOrder(_) => continue,
+            };
+
+            events.push(TimedBrokerOrderEvent {
+                observed_at: Utc::now(),
+                elapsed_ms: started.elapsed().as_millis() as i64,
+                event,
+            });
         }
 
         Ok(events)
@@ -174,6 +193,7 @@ pub struct GuardedPaperOrderExecutor {
 
 struct GuardedPaperOrderExecutorInner<G> {
     gateway: G,
+    minimum_collection_window: Duration,
     idle_timeout: Duration,
 }
 
@@ -182,6 +202,7 @@ impl GuardedPaperOrderExecutor {
         Self {
             inner: GuardedPaperOrderExecutorInner {
                 gateway: IbkrOrderGateway::new(client),
+                minimum_collection_window: Duration::from_secs(60),
                 idle_timeout: Duration::from_secs(5),
             },
         }
@@ -193,6 +214,7 @@ impl<G> GuardedPaperOrderExecutorInner<G> {
     fn new(gateway: G, idle_timeout: Duration) -> Self {
         Self {
             gateway,
+            minimum_collection_window: Duration::from_secs(60),
             idle_timeout,
         }
     }
@@ -253,6 +275,8 @@ where
                 note: "no order intents passed all guardrails in this cycle".to_string(),
                 legs: Vec::new(),
                 fill_reconciliation: None,
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
             });
         }
 
@@ -309,6 +333,8 @@ where
                 .to_string(),
             legs: vec![stock_record, option_record],
             fill_reconciliation: Some(fill_reconciliation),
+            broker_event_log_path: combo_submission.broker_event_log_path.clone(),
+            broker_event_timeline: broker_event_timeline(&combo_submission),
         })
     }
 
@@ -323,13 +349,26 @@ where
         let order_id = self.gateway.next_order_id();
         let events = self
             .gateway
-            .place_order_and_collect(order_id, &contract, &order, self.idle_timeout)
+            .place_order_and_collect(
+                order_id,
+                &contract,
+                &order,
+                self.minimum_collection_window,
+                self.idle_timeout,
+            )
             .await?;
+        let broker_event_log_path = persist_broker_event_log(
+            &intent.symbol,
+            &intent.account,
+            order_id,
+            &events,
+        )?;
 
         Ok(SubmittedOrderOutcome {
             order_id,
             is_combo: true,
             events,
+            broker_event_log_path: Some(broker_event_log_path.display().to_string()),
         })
     }
 }
@@ -379,7 +418,92 @@ fn dry_run_record(
             })
             .collect(),
         fill_reconciliation: None,
+        broker_event_log_path: None,
+        broker_event_timeline: Vec::new(),
     }
+}
+
+fn broker_event_timeline(outcome: &SubmittedOrderOutcome) -> Vec<BrokerEventTimelineEntry> {
+    outcome
+        .events
+        .iter()
+        .map(|event| BrokerEventTimelineEntry {
+            observed_at: event.observed_at.clone(),
+            elapsed_ms: event.elapsed_ms,
+            event_type: broker_event_type_label(&event.event).to_string(),
+            detail: broker_event_detail(&event.event),
+        })
+        .collect()
+}
+
+fn broker_event_type_label(event: &BrokerOrderEvent) -> &'static str {
+    match event {
+        BrokerOrderEvent::OrderStatus(_) => "orderStatus",
+        BrokerOrderEvent::ExecutionData(_) => "executionData",
+        BrokerOrderEvent::CommissionReport(_) => "commissionReport",
+        BrokerOrderEvent::Message { .. } => "message",
+    }
+}
+
+fn broker_event_detail(event: &BrokerOrderEvent) -> String {
+    match event {
+        BrokerOrderEvent::OrderStatus(status) => format!(
+            "status={} filled={} remaining={} avg_fill_price={} last_fill_price={} why_held={}",
+            status.status,
+            status.filled,
+            status.remaining,
+            status.average_fill_price,
+            status.last_fill_price,
+            status.why_held
+        ),
+        BrokerOrderEvent::ExecutionData(data) => format!(
+            "execution_id={} contract_id={} shares={} cumulative_quantity={} price={}",
+            data.execution.execution_id,
+            data.contract.contract_id,
+            data.execution.shares,
+            data.execution.cumulative_quantity,
+            data.execution.price
+        ),
+        BrokerOrderEvent::CommissionReport(report) => format!(
+            "execution_id={} commission={} currency={} realized_pnl={:?}",
+            report.execution_id,
+            report.commission,
+            report.currency,
+            report.realized_pnl
+        ),
+        BrokerOrderEvent::Message { code, message } => format!("code={code} message={message}"),
+    }
+}
+
+fn persist_broker_event_log(
+    symbol: &str,
+    account: &str,
+    order_id: i32,
+    events: &[TimedBrokerOrderEvent],
+) -> Result<std::path::PathBuf> {
+    let logs_dir = Path::new("logs");
+    fs::create_dir_all(logs_dir).context("failed to create logs directory for broker event logs")?;
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let path = logs_dir.join(format!(
+        "ibkr-order-events-{}-{}-{}-{}.json",
+        timestamp, account, symbol, order_id
+    ));
+    let timeline = events
+        .iter()
+        .map(|event| BrokerEventTimelineEntry {
+            observed_at: event.observed_at.clone(),
+            elapsed_ms: event.elapsed_ms,
+            event_type: broker_event_type_label(&event.event).to_string(),
+            detail: broker_event_detail(&event.event),
+        })
+        .collect::<Vec<_>>();
+    fs::write(&path, serde_json::to_string_pretty(&timeline)?).with_context(|| {
+        format!(
+            "failed to write IBKR broker event log to {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
 }
 
 fn build_ibkr_combo_contract(
@@ -483,8 +607,8 @@ fn summarize_leg_outcome(
     let mut notes = Vec::new();
     let leg_contract_id = leg.contract_id;
 
-    for event in &outcome.events {
-        match event {
+    for timed_event in &outcome.events {
+        match &timed_event.event {
             BrokerOrderEvent::OrderStatus(order_status) => {
                 if !order_status.status.is_empty() {
                     status = order_status.status.clone();
@@ -525,8 +649,8 @@ fn summarize_leg_outcome(
         }
     }
 
-    for event in &outcome.events {
-        let BrokerOrderEvent::CommissionReport(report) = event else {
+    for timed_event in &outcome.events {
+        let BrokerOrderEvent::CommissionReport(report) = &timed_event.event else {
             continue;
         };
         if execution_ids
@@ -675,8 +799,8 @@ mod tests {
 
     use super::{
         BrokerOrderEvent, BrokerOrderGateway, GuardedPaperOrderExecutorInner, OrderExecutor,
-        SubmittedOrderOutcome, build_ibkr_combo_contract, build_ibkr_combo_order,
-        reconcile_buy_write_fill, summarize_leg_outcome,
+        SubmittedOrderOutcome, TimedBrokerOrderEvent, build_ibkr_combo_contract,
+        build_ibkr_combo_order, reconcile_buy_write_fill, summarize_leg_outcome,
     };
     use crate::{
         config::{
@@ -687,6 +811,7 @@ mod tests {
     };
     use anyhow::Result;
     use async_trait::async_trait;
+    use chrono::Utc;
     use ibapi::{
         orders::{CommissionReport, Execution, ExecutionData, Order, OrderStatus},
         prelude::{Contract, SecurityType},
@@ -723,12 +848,24 @@ mod tests {
             order_id: i32,
             contract: &Contract,
             order: &Order,
+            _minimum_collection_window: Duration,
             _idle_timeout: Duration,
-        ) -> Result<Vec<BrokerOrderEvent>> {
+        ) -> Result<Vec<TimedBrokerOrderEvent>> {
             self.submissions
                 .borrow_mut()
                 .push((order_id, contract.clone(), order.clone()));
-            Ok(self.events.borrow_mut().pop_front().unwrap_or_default())
+            Ok(self
+                .events
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|event| TimedBrokerOrderEvent {
+                    observed_at: Utc::now(),
+                    elapsed_ms: 0,
+                    event,
+                })
+                .collect())
         }
     }
 
@@ -872,27 +1009,36 @@ mod tests {
                 order_id: 10,
                 is_combo: true,
                 events: vec![
-                    BrokerOrderEvent::ExecutionData(ExecutionData {
-                        contract: Contract {
-                            contract_id: intent.legs[0].contract_id.unwrap(),
-                            ..Contract::default()
-                        },
-                        execution: Execution {
+                    TimedBrokerOrderEvent {
+                        observed_at: Utc::now(),
+                        elapsed_ms: 0,
+                        event: BrokerOrderEvent::ExecutionData(ExecutionData {
+                            contract: Contract {
+                                contract_id: intent.legs[0].contract_id.unwrap(),
+                                ..Contract::default()
+                            },
+                            execution: Execution {
+                                execution_id: "stock-fill".to_string(),
+                                shares: 100.0,
+                                cumulative_quantity: 100.0,
+                                price: 100.25,
+                                average_price: 100.25,
+                                ..Execution::default()
+                            },
+                            ..ExecutionData::default()
+                        }),
+                    },
+                    TimedBrokerOrderEvent {
+                        observed_at: Utc::now(),
+                        elapsed_ms: 1,
+                        event: BrokerOrderEvent::CommissionReport(CommissionReport {
                             execution_id: "stock-fill".to_string(),
-                            shares: 100.0,
-                            cumulative_quantity: 100.0,
-                            price: 100.25,
-                            average_price: 100.25,
-                            ..Execution::default()
-                        },
-                        ..ExecutionData::default()
-                    }),
-                    BrokerOrderEvent::CommissionReport(CommissionReport {
-                        execution_id: "stock-fill".to_string(),
-                        commission: 1.25,
-                        ..CommissionReport::default()
-                    }),
+                            commission: 1.25,
+                            ..CommissionReport::default()
+                        }),
+                    },
                 ],
+                broker_event_log_path: None,
             }),
         );
         let option_summary = summarize_leg_outcome(
@@ -901,27 +1047,36 @@ mod tests {
                 order_id: 10,
                 is_combo: true,
                 events: vec![
-                    BrokerOrderEvent::ExecutionData(ExecutionData {
-                        contract: Contract {
-                            contract_id: intent.legs[1].contract_id.unwrap(),
-                            ..Contract::default()
-                        },
-                        execution: Execution {
+                    TimedBrokerOrderEvent {
+                        observed_at: Utc::now(),
+                        elapsed_ms: 0,
+                        event: BrokerOrderEvent::ExecutionData(ExecutionData {
+                            contract: Contract {
+                                contract_id: intent.legs[1].contract_id.unwrap(),
+                                ..Contract::default()
+                            },
+                            execution: Execution {
+                                execution_id: "option-fill".to_string(),
+                                shares: 1.0,
+                                cumulative_quantity: 1.0,
+                                price: 14.0,
+                                average_price: 14.0,
+                                ..Execution::default()
+                            },
+                            ..ExecutionData::default()
+                        }),
+                    },
+                    TimedBrokerOrderEvent {
+                        observed_at: Utc::now(),
+                        elapsed_ms: 1,
+                        event: BrokerOrderEvent::CommissionReport(CommissionReport {
                             execution_id: "option-fill".to_string(),
-                            shares: 1.0,
-                            cumulative_quantity: 1.0,
-                            price: 14.0,
-                            average_price: 14.0,
-                            ..Execution::default()
-                        },
-                        ..ExecutionData::default()
-                    }),
-                    BrokerOrderEvent::CommissionReport(CommissionReport {
-                        execution_id: "option-fill".to_string(),
-                        commission: 0.65,
-                        ..CommissionReport::default()
-                    }),
+                            commission: 0.65,
+                            ..CommissionReport::default()
+                        }),
+                    },
                 ],
+                broker_event_log_path: None,
             }),
         );
         let reconciliation = reconcile_buy_write_fill(

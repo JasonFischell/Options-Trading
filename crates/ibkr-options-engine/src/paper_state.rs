@@ -412,6 +412,8 @@ mod tests {
                     status: "stock-pending".to_string(),
                     note: "pending".to_string(),
                 }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
             }],
             &[intent("AAPL")],
             &mut Vec::new(),

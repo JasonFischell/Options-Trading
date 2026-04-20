@@ -296,6 +296,14 @@ pub struct FillReconciliationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerEventTimelineEntry {
+    pub observed_at: DateTime<Utc>,
+    pub elapsed_ms: i64,
+    pub event_type: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
     pub symbol: String,
     pub status: String,
@@ -303,6 +311,8 @@ pub struct ExecutionRecord {
     pub note: String,
     pub legs: Vec<ExecutionLegRecord>,
     pub fill_reconciliation: Option<FillReconciliationRecord>,
+    pub broker_event_log_path: Option<String>,
+    pub broker_event_timeline: Vec<BrokerEventTimelineEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

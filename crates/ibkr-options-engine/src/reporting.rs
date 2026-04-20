@@ -129,6 +129,37 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
         }
     }
 
+    let broker_event_records = report
+        .execution_records
+        .iter()
+        .filter(|record| {
+            record.broker_event_log_path.is_some() || !record.broker_event_timeline.is_empty()
+        })
+        .collect::<Vec<_>>();
+    if !broker_event_records.is_empty() {
+        lines.push(String::new());
+        lines.push("Broker event timelines:".to_string());
+        for record in broker_event_records {
+            let log_path = record
+                .broker_event_log_path
+                .as_deref()
+                .unwrap_or("not persisted");
+            lines.push(format!(
+                "- {} [{}] {} events logged at {}",
+                record.symbol,
+                record.status,
+                record.broker_event_timeline.len(),
+                log_path
+            ));
+            for event in &record.broker_event_timeline {
+                lines.push(format!(
+                    "  +{}ms {} {}",
+                    event.elapsed_ms, event.event_type, event.detail
+                ));
+            }
+        }
+    }
+
     if !report.notes.is_empty() {
         lines.push(String::new());
         lines.push("Notes:".to_string());
