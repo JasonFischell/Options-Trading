@@ -80,6 +80,7 @@ mod tests {
     #[test]
     fn returns_candidate_when_thresholds_are_met() {
         let snapshot = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 180.0,
             bid: None,
@@ -113,6 +114,7 @@ mod tests {
     #[test]
     fn rejects_invalid_inputs() {
         let snapshot = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "MSFT".to_string(),
             price: 0.0,
             bid: None,

@@ -87,7 +87,7 @@ impl PaperTradeLedger {
                 )
             } else {
                 format!(
-                    "IBKR reports {:.0} shares and no short call yet; submission remains stock-first and hold-to-close only",
+                    "IBKR reports {:.0} shares and no short call yet; a combo BAG submission may have partially filled, and the position remains hold-to-close only",
                     position.stock_shares
                 )
             };
@@ -337,7 +337,8 @@ mod tests {
             symbol: symbol.to_string(),
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: "DU123".to_string(),
-            mode: "paper-stock-first".to_string(),
+            mode: "paper-combo-bag".to_string(),
+            combo_limit_price: Some(9.0),
             estimated_net_debit: 1.0,
             estimated_credit: 1.0,
             max_profit: 1.0,
@@ -345,6 +346,7 @@ mod tests {
                 OrderLegIntent {
                     instrument_type: InstrumentType::Stock,
                     action: TradeAction::Buy,
+                    contract_id: Some(1001),
                     symbol: symbol.to_string(),
                     description: "Buy".to_string(),
                     quantity: 100,
@@ -360,6 +362,7 @@ mod tests {
                 OrderLegIntent {
                     instrument_type: InstrumentType::Option,
                     action: TradeAction::Sell,
+                    contract_id: Some(2001),
                     symbol: symbol.to_string(),
                     description: "Sell".to_string(),
                     quantity: 1,

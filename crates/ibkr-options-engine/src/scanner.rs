@@ -27,7 +27,7 @@ pub fn build_scan_plan(config: &AppConfig, symbols: &[String]) -> ScanPlan {
     {
         "live-disabled"
     } else if config.risk.enable_paper_orders {
-        "paper-stock-first"
+        "paper-combo-bag"
     } else {
         "analysis-only"
     };
@@ -337,7 +337,7 @@ where
                 .to_string(),
             "IB Gateway remains the default broker platform; switch to TWS by setting IBKR_PLATFORM=tws and letting the platform-specific default port follow unless you intentionally override IBKR_PORT.".to_string(),
             if config.guarded_paper_submission_enabled() {
-                "Deep-ITM covered-call buy-write execution submits the stock leg first in paper mode, persists idempotency state on disk, and only advances the short call after fill reconciliation."
+                "Deep-ITM covered-call buy-write execution submits a single combo BAG order in paper mode, persists idempotency state on disk, and tracks the combined fill as one routed order."
                     .to_string()
             } else if config.risk.enable_live_orders
                 || matches!(config.mode, crate::config::RuntimeMode::Live)
@@ -495,6 +495,7 @@ mod tests {
             "AAPL".to_string(),
             SymbolMarketSnapshot {
                 underlying: UnderlyingSnapshot {
+                    contract_id: 1,
                     symbol: "AAPL".to_string(),
                     price: 100.0,
                     bid: Some(99.9),
@@ -507,6 +508,7 @@ mod tests {
                     market_data_notices: Vec::new(),
                 },
                 option_quotes: vec![OptionQuoteSnapshot {
+                    contract_id: 2,
                     symbol: "AAPL".to_string(),
                     expiry: "20991217".to_string(),
                     strike: 90.0,
@@ -567,6 +569,7 @@ mod tests {
             "AAPL".to_string(),
             SymbolMarketSnapshot {
                 underlying: UnderlyingSnapshot {
+                    contract_id: 1,
                     symbol: "AAPL".to_string(),
                     price: 100.0,
                     bid: Some(99.9),
@@ -581,6 +584,7 @@ mod tests {
                     ],
                 },
                 option_quotes: vec![OptionQuoteSnapshot {
+                    contract_id: 2,
                     symbol: "AAPL".to_string(),
                     expiry: "20991217".to_string(),
                     strike: 90.0,
@@ -683,6 +687,7 @@ mod tests {
             "AAPL".to_string(),
             SymbolMarketSnapshot {
                 underlying: UnderlyingSnapshot {
+                    contract_id: 1,
                     symbol: "AAPL".to_string(),
                     price: 100.0,
                     bid: Some(99.9),
@@ -695,6 +700,7 @@ mod tests {
                     market_data_notices: Vec::new(),
                 },
                 option_quotes: vec![OptionQuoteSnapshot {
+                    contract_id: 2,
                     symbol: "AAPL".to_string(),
                     expiry: "20991217".to_string(),
                     strike: 90.0,

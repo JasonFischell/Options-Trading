@@ -7,7 +7,7 @@ The current vertical slice is designed around token-efficient Codex sessions:
 - scheduled batch scans instead of an always-on daemon
 - delayed or delayed-frozen snapshots before live data
 - a small watchlist first, then controlled expansion
-- guarded deep-ITM covered-call buy-write intent generation with stock-first paper routing behind explicit flags
+- guarded deep-ITM covered-call buy-write intent generation with combo-BAG paper routing behind explicit flags
 - IB Gateway as the default broker runtime for unattended or semi-attended scans
 - a default 50-symbol universe loaded from `docs/50_stocks_list.csv` with a `$1-$20` underlying filter
 
@@ -21,7 +21,7 @@ The Rust crate is organized around the runtime layers we want long term:
 - `strategy`: deep-ITM covered-call candidate evaluation only
 - `state`: portfolio summaries and deep-ITM buy-write order-intent guardrails
 - `paper_state`: persistent paper-order idempotency and hold-to-close lifecycle tracking
-- `execution`: guarded dry-run plus paper-only stock-first submission layer
+- `execution`: guarded dry-run plus paper-only combo-BAG submission layer
 - `scanner`: end-to-end cycle orchestration and cycle-report generation
 - `scoring`: legacy/reference scoring math carried forward for parity work
 

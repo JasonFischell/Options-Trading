@@ -3,8 +3,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ibapi::{
+    contracts::{ComboLeg, ComboLegOpenClose},
     orders::{
-        Action, CommissionReport, ExecutionData, Order, OrderStatus, PlaceOrder, order_builder,
+        Action, CommissionReport, ExecutionData, Order, OrderStatus, PlaceOrder, TagValue,
+        order_builder,
     },
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
@@ -66,8 +68,9 @@ enum BrokerOrderEvent {
 }
 
 #[derive(Debug, Clone)]
-struct SubmittedLegOutcome {
+struct SubmittedOrderOutcome {
     order_id: i32,
+    is_combo: bool,
     events: Vec<BrokerOrderEvent>,
 }
 
@@ -287,38 +290,14 @@ where
                 )
             })?;
 
-        let stock_submission = self.submit_leg(intent, stock_leg).await?;
-        let stock_summary = summarize_leg_outcome(stock_leg, Some(&stock_submission));
-        let stock_record = execution_leg_record(stock_leg, Some(&stock_submission), &stock_summary);
-
-        if !stock_summary.is_fully_filled(stock_leg.quantity) {
-            return Ok(ExecutionRecord {
-                symbol: intent.symbol.clone(),
-                status: "stock-pending".to_string(),
-                submission_mode: "paper".to_string(),
-                note: "submitted stock leg in paper mode; short call remains blocked until fill reconciliation confirms covered shares"
-                    .to_string(),
-                legs: vec![
-                    stock_record,
-                    pending_leg_record(
-                        option_leg,
-                        "awaiting-stock-fill",
-                        "stock leg has not fully filled yet; short-call submission remains gated",
-                    ),
-                ],
-                fill_reconciliation: Some(reconcile_buy_write_fill(
-                    stock_leg,
-                    &stock_summary,
-                    option_leg,
-                    None,
-                )),
-            });
-        }
-
-        let option_submission = self.submit_leg(intent, option_leg).await?;
-        let option_summary = summarize_leg_outcome(option_leg, Some(&option_submission));
+        let combo_submission = self
+            .submit_combo_buy_write(intent, stock_leg, option_leg)
+            .await?;
+        let stock_summary = summarize_leg_outcome(stock_leg, Some(&combo_submission));
+        let stock_record = execution_leg_record(stock_leg, Some(&combo_submission), &stock_summary);
+        let option_summary = summarize_leg_outcome(option_leg, Some(&combo_submission));
         let option_record =
-            execution_leg_record(option_leg, Some(&option_submission), &option_summary);
+            execution_leg_record(option_leg, Some(&combo_submission), &option_summary);
         let fill_reconciliation =
             reconcile_buy_write_fill(stock_leg, &stock_summary, option_leg, Some(&option_summary));
 
@@ -326,27 +305,32 @@ where
             symbol: intent.symbol.clone(),
             status: fill_reconciliation.status.clone(),
             submission_mode: "paper".to_string(),
-            note: "submitted guarded deep-ITM covered-call buy-write legs in paper mode using stock-first sequencing"
+            note: "submitted guarded deep-ITM covered-call buy-write as one combo BAG order in paper mode"
                 .to_string(),
             legs: vec![stock_record, option_record],
             fill_reconciliation: Some(fill_reconciliation),
         })
     }
 
-    async fn submit_leg(
+    async fn submit_combo_buy_write(
         &self,
         intent: &OrderIntent,
-        leg: &OrderLegIntent,
-    ) -> Result<SubmittedLegOutcome> {
-        let contract = build_ibkr_contract(leg)?;
-        let order = build_ibkr_order(intent, leg)?;
+        stock_leg: &OrderLegIntent,
+        option_leg: &OrderLegIntent,
+    ) -> Result<SubmittedOrderOutcome> {
+        let contract = build_ibkr_combo_contract(intent, stock_leg, option_leg)?;
+        let order = build_ibkr_combo_order(intent, stock_leg, option_leg)?;
         let order_id = self.gateway.next_order_id();
         let events = self
             .gateway
             .place_order_and_collect(order_id, &contract, &order, self.idle_timeout)
             .await?;
 
-        Ok(SubmittedLegOutcome { order_id, events })
+        Ok(SubmittedOrderOutcome {
+            order_id,
+            is_combo: true,
+            events,
+        })
     }
 }
 
@@ -361,7 +345,7 @@ fn dry_run_note(config: &AppConfig) -> String {
         && matches!(config.mode, RuntimeMode::Paper)
         && !config.read_only
     {
-        "paper-order flag is enabled; stock-first guarded submission will only run when a live IBKR client is attached"
+        "paper-order flag is enabled; combo BAG guarded submission will only run when a live IBKR client is attached"
             .to_string()
     } else {
         "proposed dry-run order only; no broker submission attempted".to_string()
@@ -398,69 +382,84 @@ fn dry_run_record(
     }
 }
 
-fn build_ibkr_contract(leg: &OrderLegIntent) -> Result<Contract> {
-    match leg.instrument_type {
-        InstrumentType::Stock => Ok(Contract {
-            symbol: Symbol::from(leg.symbol.as_str()),
-            security_type: SecurityType::Stock,
-            exchange: Exchange::from(leg.exchange.as_deref().unwrap_or("SMART")),
-            currency: Currency::from(leg.currency.as_deref().unwrap_or("USD")),
-            ..Default::default()
-        }),
-        InstrumentType::Option => {
-            let expiry = leg
-                .expiry
+fn build_ibkr_combo_contract(
+    intent: &OrderIntent,
+    stock_leg: &OrderLegIntent,
+    option_leg: &OrderLegIntent,
+) -> Result<Contract> {
+    let stock_contract_id = stock_leg
+        .contract_id
+        .with_context(|| format!("missing stock contract id for {}", stock_leg.description))?;
+    let option_contract_id = option_leg
+        .contract_id
+        .with_context(|| format!("missing option contract id for {}", option_leg.description))?;
+
+    Ok(Contract {
+        symbol: Symbol::from(intent.symbol.as_str()),
+        security_type: SecurityType::Spread,
+        exchange: Exchange::from("SMART"),
+        currency: Currency::from(
+            stock_leg
+                .currency
                 .as_deref()
-                .with_context(|| format!("missing option expiry for {}", leg.description))?;
-            let strike = leg
-                .strike
-                .with_context(|| format!("missing option strike for {}", leg.description))?;
-            let right = leg
-                .right
-                .as_deref()
-                .with_context(|| format!("missing option right for {}", leg.description))?;
-            let mut contract = Contract::option(&leg.symbol, expiry, strike, right);
-            contract.exchange = Exchange::from(leg.exchange.as_deref().unwrap_or("SMART"));
-            contract.currency = Currency::from(leg.currency.as_deref().unwrap_or("USD"));
-            if let Some(trading_class) = &leg.trading_class {
-                contract.trading_class = trading_class.clone();
-            }
-            if let Some(multiplier) = &leg.multiplier {
-                contract.multiplier = multiplier.clone();
-            }
-            Ok(contract)
-        }
-    }
+                .or(option_leg.currency.as_deref())
+                .unwrap_or("USD"),
+        ),
+        combo_legs: vec![
+            ComboLeg {
+                contract_id: stock_contract_id,
+                ratio: 100,
+                action: "BUY".to_string(),
+                exchange: "SMART".to_string(),
+                open_close: ComboLegOpenClose::Same,
+                ..Default::default()
+            },
+            ComboLeg {
+                contract_id: option_contract_id,
+                ratio: 1,
+                action: "SELL".to_string(),
+                exchange: "SMART".to_string(),
+                open_close: ComboLegOpenClose::Same,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    })
 }
 
-fn build_ibkr_order(intent: &OrderIntent, leg: &OrderLegIntent) -> Result<Order> {
-    let action = match leg.action {
-        TradeAction::Buy => Action::Buy,
-        TradeAction::Sell => Action::Sell,
-    };
-    let limit_price = leg
-        .limit_price
-        .with_context(|| format!("missing limit price for {}", leg.description))?;
-    let mut order = order_builder::limit_order(action, leg.quantity as f64, limit_price);
-    order.account = intent.account.clone();
-    order.order_ref = format!(
-        "deepitm-buywrite:{}:{}:{}",
-        intent.symbol,
-        match leg.instrument_type {
-            InstrumentType::Stock => "stock",
-            InstrumentType::Option => "option",
-        },
-        match leg.action {
-            TradeAction::Buy => "buy",
-            TradeAction::Sell => "sell",
-        }
+fn build_ibkr_combo_order(
+    intent: &OrderIntent,
+    stock_leg: &OrderLegIntent,
+    option_leg: &OrderLegIntent,
+) -> Result<Order> {
+    if stock_leg.quantity != option_leg.quantity * 100 {
+        anyhow::bail!(
+            "combo ratio mismatch for {}: expected 100 stock shares per short call contract",
+            intent.symbol
+        );
+    }
+
+    let limit_price = intent
+        .combo_limit_price
+        .with_context(|| format!("missing combo limit price for {}", intent.symbol))?;
+    let mut order = order_builder::combo_limit_order(
+        Action::Buy,
+        option_leg.quantity as f64,
+        limit_price,
+        false,
     );
+    order.account = intent.account.clone();
+    order.order_ref = format!("deepitm-buywrite:{}:combo:buywrite", intent.symbol);
+    order.smart_combo_routing_params = vec![TagValue {
+        tag: "NonGuaranteed".to_string(),
+        value: "0".to_string(),
+    }];
     Ok(order)
 }
 
 fn summarize_leg_outcome(
     leg: &OrderLegIntent,
-    outcome: Option<&SubmittedLegOutcome>,
+    outcome: Option<&SubmittedOrderOutcome>,
 ) -> LegFillSummary {
     let Some(outcome) = outcome else {
         return LegFillSummary {
@@ -482,6 +481,7 @@ fn summarize_leg_outcome(
     let mut total_commission = 0.0;
     let mut saw_commission = false;
     let mut notes = Vec::new();
+    let leg_contract_id = leg.contract_id;
 
     for event in &outcome.events {
         match event {
@@ -489,12 +489,19 @@ fn summarize_leg_outcome(
                 if !order_status.status.is_empty() {
                     status = order_status.status.clone();
                 }
-                filled_quantity = filled_quantity.max(order_status.filled);
-                if order_status.average_fill_price > 0.0 {
+                if !outcome.is_combo {
+                    filled_quantity = filled_quantity.max(order_status.filled);
+                }
+                if !outcome.is_combo && order_status.average_fill_price > 0.0 {
                     last_average_fill_price = Some(order_status.average_fill_price);
                 }
             }
             BrokerOrderEvent::ExecutionData(data) => {
+                if leg_contract_id.is_some()
+                    && data.contract.contract_id != leg_contract_id.unwrap()
+                {
+                    continue;
+                }
                 filled_quantity = filled_quantity.max(
                     data.execution
                         .cumulative_quantity
@@ -508,16 +515,26 @@ fn summarize_leg_outcome(
                     execution_ids.push(data.execution.execution_id.clone());
                 }
             }
-            BrokerOrderEvent::CommissionReport(report) => {
-                total_commission += report.commission;
-                saw_commission = true;
-            }
+            BrokerOrderEvent::CommissionReport(_) => {}
             BrokerOrderEvent::Message { code, message } => {
                 notes.push(format!("{code}: {message}"));
                 if (200..300).contains(code) {
                     status = "rejected".to_string();
                 }
             }
+        }
+    }
+
+    for event in &outcome.events {
+        let BrokerOrderEvent::CommissionReport(report) = event else {
+            continue;
+        };
+        if execution_ids
+            .iter()
+            .any(|execution_id| execution_id == &report.execution_id)
+        {
+            total_commission += report.commission;
+            saw_commission = true;
         }
     }
 
@@ -543,7 +560,7 @@ fn summarize_leg_outcome(
 
 fn execution_leg_record(
     leg: &OrderLegIntent,
-    outcome: Option<&SubmittedLegOutcome>,
+    outcome: Option<&SubmittedOrderOutcome>,
     summary: &LegFillSummary,
 ) -> ExecutionLegRecord {
     ExecutionLegRecord {
@@ -598,33 +615,45 @@ fn reconcile_buy_write_fill(
         (None, None) => None,
     };
 
-    let (status, note) =
-        if option_summary.is_none() && stock_summary.is_fully_filled(stock_leg.quantity) {
-            (
-                "stock-filled-awaiting-short-call".to_string(),
-                "stock fill reconciled; short-call leg is now eligible for submission".to_string(),
-            )
-        } else if option_summary
-            .map(|summary| summary.is_fully_filled(option_leg.quantity))
-            .unwrap_or(false)
-        {
-            (
-                "deep-itm-covered-call-open".to_string(),
-                "stock and short-call fills reconcile to a deep-ITM covered-call paper position"
-                    .to_string(),
-            )
-        } else if option_summary.is_some() {
-            (
-            "short-call-submitted".to_string(),
-            "stock fill reconciled; short-call leg has been submitted and is still pending fill"
+    let stock_filled = stock_summary.is_fully_filled(stock_leg.quantity);
+    let option_filled = option_summary
+        .map(|summary| summary.is_fully_filled(option_leg.quantity))
+        .unwrap_or(false);
+    let saw_partial_combo_fill = stock_filled_shares > 0.0 || short_call_filled_contracts > 0.0;
+    let saw_rejection = stock_summary.status.eq_ignore_ascii_case("rejected")
+        || option_summary
+            .map(|summary| summary.status.eq_ignore_ascii_case("rejected"))
+            .unwrap_or(false);
+
+    let (status, note) = if saw_rejection {
+        (
+            "combo-rejected".to_string(),
+            "the combo BAG order was rejected before the covered-call position could be opened"
                 .to_string(),
         )
-        } else {
-            (
-                "stock-pending".to_string(),
-                "stock leg has not fully filled, so the short-call leg remains gated".to_string(),
-            )
-        };
+    } else if stock_filled && option_filled {
+        (
+            "deep-itm-covered-call-open".to_string(),
+            "the combo BAG fill reconciles to a deep-ITM covered-call paper position".to_string(),
+        )
+    } else if saw_partial_combo_fill {
+        (
+            "combo-partial".to_string(),
+            "the combo BAG order partially filled and still leaves temporary uncovered-share risk"
+                .to_string(),
+        )
+    } else if option_summary.is_some() {
+        (
+            "combo-submitted".to_string(),
+            "the combo BAG order has been submitted and is awaiting a synchronized fill"
+                .to_string(),
+        )
+    } else {
+        (
+            "not-submitted".to_string(),
+            "the combo BAG order has not been submitted".to_string(),
+        )
+    };
 
     FillReconciliationRecord {
         stock_filled_shares,
@@ -633,8 +662,7 @@ fn reconcile_buy_write_fill(
         short_call_average_fill_price: option_summary
             .and_then(|summary| summary.average_fill_price),
         total_commission,
-        eligible_for_short_call: option_summary.is_none()
-            && stock_summary.is_fully_filled(stock_leg.quantity),
+        eligible_for_short_call: false,
         uncovered_shares,
         status,
         note,
@@ -647,8 +675,8 @@ mod tests {
 
     use super::{
         BrokerOrderEvent, BrokerOrderGateway, GuardedPaperOrderExecutorInner, OrderExecutor,
-        SubmittedLegOutcome, build_ibkr_contract, build_ibkr_order, reconcile_buy_write_fill,
-        summarize_leg_outcome,
+        SubmittedOrderOutcome, build_ibkr_combo_contract, build_ibkr_combo_order,
+        reconcile_buy_write_fill, summarize_leg_outcome,
     };
     use crate::{
         config::{
@@ -661,7 +689,7 @@ mod tests {
     use async_trait::async_trait;
     use ibapi::{
         orders::{CommissionReport, Execution, ExecutionData, Order, OrderStatus},
-        prelude::Contract,
+        prelude::{Contract, SecurityType},
     };
     use tokio::time::Duration;
 
@@ -734,7 +762,8 @@ mod tests {
             symbol: "AAPL".to_string(),
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: "DU1234567".to_string(),
-            mode: "paper-stock-first".to_string(),
+            mode: "paper-combo-bag".to_string(),
+            combo_limit_price: Some(86.0),
             estimated_net_debit: 8_600.0,
             estimated_credit: 1_400.0,
             max_profit: 400.0,
@@ -742,6 +771,7 @@ mod tests {
                 OrderLegIntent {
                     instrument_type: InstrumentType::Stock,
                     action: TradeAction::Buy,
+                    contract_id: Some(265598),
                     symbol: "AAPL".to_string(),
                     description: "Buy 100 shares of AAPL".to_string(),
                     quantity: 100,
@@ -757,6 +787,7 @@ mod tests {
                 OrderLegIntent {
                     instrument_type: InstrumentType::Option,
                     action: TradeAction::Sell,
+                    contract_id: Some(900000001),
                     symbol: "AAPL".to_string(),
                     description: "Sell 1 deep-ITM covered call AAPL 20260515 90".to_string(),
                     quantity: 1,
@@ -774,34 +805,40 @@ mod tests {
     }
 
     #[test]
-    fn builds_ibkr_order_contracts_with_option_metadata() {
+    fn builds_ibkr_combo_order_contracts_with_leg_metadata() {
         let intent = buy_write_intent();
-        let stock_contract = build_ibkr_contract(&intent.legs[0]).unwrap();
-        let option_contract = build_ibkr_contract(&intent.legs[1]).unwrap();
-        let option_order = build_ibkr_order(&intent, &intent.legs[1]).unwrap();
+        let combo_contract =
+            build_ibkr_combo_contract(&intent, &intent.legs[0], &intent.legs[1]).unwrap();
+        let combo_order =
+            build_ibkr_combo_order(&intent, &intent.legs[0], &intent.legs[1]).unwrap();
 
-        assert_eq!(stock_contract.symbol.to_string(), "AAPL");
-        assert_eq!(option_contract.trading_class, "AAPL");
-        assert_eq!(option_contract.multiplier, "100");
-        assert_eq!(option_contract.right, "C");
+        assert_eq!(combo_contract.symbol.to_string(), "AAPL");
+        assert_eq!(combo_contract.security_type, SecurityType::Spread);
+        assert_eq!(combo_contract.combo_legs.len(), 2);
+        assert_eq!(combo_contract.combo_legs[0].ratio, 100);
+        assert_eq!(combo_contract.combo_legs[0].action, "BUY");
+        assert_eq!(combo_contract.combo_legs[1].ratio, 1);
+        assert_eq!(combo_contract.combo_legs[1].action, "SELL");
+        assert_eq!(combo_order.account, "DU1234567");
+        assert_eq!(combo_order.total_quantity, 1.0);
+        assert_eq!(combo_order.limit_price, Some(86.0));
+        assert_eq!(combo_order.smart_combo_routing_params.len(), 1);
         assert_eq!(
-            option_contract.last_trade_date_or_contract_month,
-            "20260515"
+            combo_order.smart_combo_routing_params[0].tag,
+            "NonGuaranteed"
         );
-        assert_eq!(option_order.account, "DU1234567");
-        assert_eq!(option_order.total_quantity, 1.0);
-        assert_eq!(option_order.limit_price, Some(14.0));
+        assert_eq!(combo_order.smart_combo_routing_params[0].value, "0");
     }
 
     #[tokio::test]
-    async fn submits_stock_first_and_holds_option_until_fill() {
+    async fn submits_combo_bag_once_and_tracks_both_legs_together() {
         let gateway = MockGateway::new(
             vec![10],
             vec![vec![BrokerOrderEvent::OrderStatus(OrderStatus {
                 order_id: 10,
                 status: "Submitted".to_string(),
                 filled: 0.0,
-                remaining: 100.0,
+                remaining: 1.0,
                 ..OrderStatus::default()
             })]],
         );
@@ -812,10 +849,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].status, "stock-pending");
+        assert_eq!(records[0].status, "combo-submitted");
         assert_eq!(records[0].legs.len(), 2);
         assert_eq!(records[0].legs[0].order_id, Some(10));
-        assert_eq!(records[0].legs[1].submission_status, "awaiting-stock-fill");
+        assert_eq!(records[0].legs[1].order_id, Some(10));
+        assert_eq!(records[0].legs[0].submission_status, "Submitted");
+        assert_eq!(records[0].legs[1].submission_status, "Submitted");
         assert!(
             records[0]
                 .fill_reconciliation
@@ -825,14 +864,19 @@ mod tests {
     }
 
     #[test]
-    fn fill_reconciliation_scaffolding_marks_short_call_eligibility() {
+    fn fill_reconciliation_scaffolding_tracks_combo_fills_per_leg() {
         let intent = buy_write_intent();
         let stock_summary = summarize_leg_outcome(
             &intent.legs[0],
-            Some(&SubmittedLegOutcome {
+            Some(&SubmittedOrderOutcome {
                 order_id: 10,
+                is_combo: true,
                 events: vec![
                     BrokerOrderEvent::ExecutionData(ExecutionData {
+                        contract: Contract {
+                            contract_id: intent.legs[0].contract_id.unwrap(),
+                            ..Contract::default()
+                        },
                         execution: Execution {
                             execution_id: "stock-fill".to_string(),
                             shares: 100.0,
@@ -851,12 +895,45 @@ mod tests {
                 ],
             }),
         );
-        let reconciliation =
-            reconcile_buy_write_fill(&intent.legs[0], &stock_summary, &intent.legs[1], None);
+        let option_summary = summarize_leg_outcome(
+            &intent.legs[1],
+            Some(&SubmittedOrderOutcome {
+                order_id: 10,
+                is_combo: true,
+                events: vec![
+                    BrokerOrderEvent::ExecutionData(ExecutionData {
+                        contract: Contract {
+                            contract_id: intent.legs[1].contract_id.unwrap(),
+                            ..Contract::default()
+                        },
+                        execution: Execution {
+                            execution_id: "option-fill".to_string(),
+                            shares: 1.0,
+                            cumulative_quantity: 1.0,
+                            price: 14.0,
+                            average_price: 14.0,
+                            ..Execution::default()
+                        },
+                        ..ExecutionData::default()
+                    }),
+                    BrokerOrderEvent::CommissionReport(CommissionReport {
+                        execution_id: "option-fill".to_string(),
+                        commission: 0.65,
+                        ..CommissionReport::default()
+                    }),
+                ],
+            }),
+        );
+        let reconciliation = reconcile_buy_write_fill(
+            &intent.legs[0],
+            &stock_summary,
+            &intent.legs[1],
+            Some(&option_summary),
+        );
 
-        assert_eq!(reconciliation.status, "stock-filled-awaiting-short-call");
-        assert!(reconciliation.eligible_for_short_call);
-        assert_eq!(reconciliation.uncovered_shares, 100.0);
-        assert_eq!(reconciliation.total_commission, Some(1.25));
+        assert_eq!(reconciliation.status, "deep-itm-covered-call-open");
+        assert!(!reconciliation.eligible_for_short_call);
+        assert_eq!(reconciliation.uncovered_shares, 0.0);
+        assert_eq!(reconciliation.total_commission, Some(1.9));
     }
 }

@@ -9,6 +9,7 @@ pub struct UniverseRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnderlyingSnapshot {
+    pub contract_id: i32,
     pub symbol: String,
     pub price: f64,
     pub bid: Option<f64>,
@@ -51,6 +52,7 @@ fn observed_data_origin(diagnostics: &[String]) -> Option<&str> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionQuoteSnapshot {
+    pub contract_id: i32,
     pub symbol: String,
     pub expiry: String,
     pub strike: f64,
@@ -155,7 +157,10 @@ pub struct OptionCandidate {
 pub struct ScoredOptionCandidate {
     pub symbol: String,
     pub beta: f64,
+    pub underlying_contract_id: i32,
     pub underlying_price: f64,
+    pub underlying_ask: Option<f64>,
+    pub option_contract_id: i32,
     pub strike: f64,
     pub expiry: String,
     pub right: String,
@@ -228,6 +233,7 @@ pub enum TradeAction {
 pub struct OrderLegIntent {
     pub instrument_type: InstrumentType,
     pub action: TradeAction,
+    pub contract_id: Option<i32>,
     pub symbol: String,
     pub description: String,
     pub quantity: i32,
@@ -247,6 +253,7 @@ pub struct OrderIntent {
     pub strategy: String,
     pub account: String,
     pub mode: String,
+    pub combo_limit_price: Option<f64>,
     pub estimated_net_debit: f64,
     pub estimated_credit: f64,
     pub max_profit: f64,
@@ -349,6 +356,7 @@ mod tests {
 
     fn quote_with_diagnostics(diagnostics: &[&str]) -> OptionQuoteSnapshot {
         OptionQuoteSnapshot {
+            contract_id: 1,
             symbol: "MARA".to_string(),
             expiry: "20991217".to_string(),
             strike: 1.0,

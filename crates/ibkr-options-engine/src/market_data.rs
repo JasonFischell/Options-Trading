@@ -516,6 +516,7 @@ mod tests {
             }
 
             Ok(OptionQuoteSnapshot {
+                contract_id: 2,
                 symbol: selected.symbol.clone(),
                 expiry: selected.expiration.clone(),
                 strike: selected.strike,

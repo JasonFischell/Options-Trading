@@ -399,6 +399,7 @@ pub async fn request_underlying_snapshot_for_contract(
         .unwrap_or_default();
 
     Ok(UnderlyingSnapshot {
+        contract_id: contract.contract_id,
         symbol: symbol.to_string(),
         price,
         bid: snapshot.bid,
@@ -690,6 +691,7 @@ pub async fn request_option_quote(
     };
 
     Ok(OptionQuoteSnapshot {
+        contract_id: option_contract.contract_id,
         symbol: option_contract.symbol.to_string(),
         expiry: option_contract.last_trade_date_or_contract_month.clone(),
         strike: option_contract.strike,

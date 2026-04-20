@@ -83,7 +83,7 @@ From the repository root:
 4. Run `cargo build`
 5. Run `cargo run -p ibkr-options-engine`
 6. Set `IBKR_CONNECT_ON_START=true` only when you want the app to test a real broker connection at startup
-7. Leave `ENABLE_LIVE_ORDERS=false`; guarded buy-write submission is paper-only and stock-first
+7. Leave `ENABLE_LIVE_ORDERS=false`; guarded buy-write submission is paper-only and routes as a combo BAG
 
 Recommended starting values:
 

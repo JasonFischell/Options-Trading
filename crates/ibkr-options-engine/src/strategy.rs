@@ -211,7 +211,10 @@ pub fn evaluate_buy_write_candidate(
     Ok(ScoredOptionCandidate {
         symbol: record.symbol.clone(),
         beta,
+        underlying_contract_id: underlying.contract_id,
         underlying_price,
+        underlying_ask: underlying.ask,
+        option_contract_id: option.contract_id,
         strike: option.strike,
         expiry: normalized_expiry,
         right: option.right.clone(),
@@ -254,6 +257,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 100.0,
             bid: Some(99.9),
@@ -266,6 +270,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "AAPL".to_string(),
             expiry: "20991217".to_string(),
             strike: 90.0,
@@ -312,6 +317,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 100.0,
             bid: Some(99.9),
@@ -324,6 +330,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "AAPL".to_string(),
             expiry: "20991217".to_string(),
             strike: 90.0,
@@ -367,6 +374,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "NVTS".to_string(),
             price: 4.2,
             bid: Some(4.1),
@@ -379,6 +387,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "NVTS".to_string(),
             expiry: "20991217".to_string(),
             strike: 4.5,
@@ -417,6 +426,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 100.0,
             bid: Some(99.9),
@@ -429,6 +439,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "AAPL".to_string(),
             expiry: "20991217".to_string(),
             strike: 98.0,
@@ -476,6 +487,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 100.0,
             bid: Some(99.9),
@@ -488,6 +500,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "AAPL".to_string(),
             expiry: "20991217".to_string(),
             strike: 40.0,
@@ -536,6 +549,7 @@ mod tests {
             beta: 1.2,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "BTBT".to_string(),
             price: 1.53,
             bid: Some(1.52),
@@ -550,6 +564,7 @@ mod tests {
             ],
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "BTBT".to_string(),
             expiry: "20991217".to_string(),
             strike: 1.0,
@@ -597,6 +612,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "PTON".to_string(),
             price: 10.0,
             bid: Some(9.9),
@@ -609,6 +625,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "PTON".to_string(),
             expiry: "20991217".to_string(),
             strike: 9.6,
@@ -659,6 +676,7 @@ mod tests {
             beta: 1.1,
         };
         let underlying = UnderlyingSnapshot {
+            contract_id: 1,
             symbol: "AAPL".to_string(),
             price: 100.0,
             bid: Some(99.9),
@@ -671,6 +689,7 @@ mod tests {
             market_data_notices: Vec::new(),
         };
         let option = OptionQuoteSnapshot {
+            contract_id: 2,
             symbol: "AAPL".to_string(),
             expiry: target_expiry.clone(),
             strike: 90.0,

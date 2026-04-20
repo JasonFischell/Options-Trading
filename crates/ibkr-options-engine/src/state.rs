@@ -8,6 +8,8 @@ use crate::{
     },
 };
 
+const COMBO_DEBIT_PRICE_IMPROVEMENT: f64 = 0.02;
+
 pub fn summarize_open_positions(positions: &[InventoryPosition]) -> Vec<OpenPositionState> {
     let mut by_symbol: BTreeMap<String, OpenPositionState> = BTreeMap::new();
 
@@ -88,7 +90,76 @@ pub fn build_order_intents(
             break;
         }
 
-        let estimated_stock_cost = candidate.underlying_price * 100.0;
+        let Some(stock_ask) = candidate.underlying_ask else {
+            rejections.push(GuardrailRejection {
+                symbol: candidate.symbol.clone(),
+                stage: "pricing".to_string(),
+                reason: "missing underlying ask required for combo BAG debit pricing".to_string(),
+            });
+            continue;
+        };
+
+        let combo_limit_price =
+            round_to_cents(stock_ask - candidate.option_bid - COMBO_DEBIT_PRICE_IMPROVEMENT);
+        if combo_limit_price <= 0.0 {
+            rejections.push(GuardrailRejection {
+                symbol: candidate.symbol.clone(),
+                stage: "pricing".to_string(),
+                reason: format!(
+                    "combo debit {:.2} is non-positive after applying the $0.02 price improvement",
+                    combo_limit_price
+                ),
+            });
+            continue;
+        }
+
+        let expiration_profit_per_share = (candidate.strike - combo_limit_price).max(0.0);
+        if expiration_profit_per_share < config.strategy.min_expiration_profit_per_share {
+            rejections.push(GuardrailRejection {
+                symbol: candidate.symbol.clone(),
+                stage: "pricing".to_string(),
+                reason: format!(
+                    "combo BAG debit {:.2} yields only {:.2} expiration profit per share, below configured minimum {:.2}",
+                    combo_limit_price,
+                    expiration_profit_per_share,
+                    config.strategy.min_expiration_profit_per_share
+                ),
+            });
+            continue;
+        }
+
+        let expiration_yield_pct = (expiration_profit_per_share / combo_limit_price) * 100.0;
+        if expiration_yield_pct < config.strategy.min_expiration_yield_pct {
+            rejections.push(GuardrailRejection {
+                symbol: candidate.symbol.clone(),
+                stage: "pricing".to_string(),
+                reason: format!(
+                    "combo BAG debit {:.2} yields only {:.2}% to expiration, below configured minimum {:.2}%",
+                    combo_limit_price,
+                    expiration_yield_pct,
+                    config.strategy.min_expiration_yield_pct
+                ),
+            });
+            continue;
+        }
+
+        let annualized_yield_pct =
+            expiration_yield_pct / (candidate.days_to_expiration as f64 / 365.0);
+        if annualized_yield_pct < config.strategy.min_annualized_yield_pct {
+            rejections.push(GuardrailRejection {
+                symbol: candidate.symbol.clone(),
+                stage: "pricing".to_string(),
+                reason: format!(
+                    "combo BAG debit {:.2} yields only {:.2}% annualized, below configured minimum {:.2}%",
+                    combo_limit_price,
+                    annualized_yield_pct,
+                    config.strategy.min_annualized_yield_pct
+                ),
+            });
+            continue;
+        }
+
+        let estimated_stock_cost = stock_ask * 100.0;
         let required_buying_power =
             estimated_stock_cost * (1.0 + config.risk.min_buying_power_buffer_pct / 100.0);
         let buying_power = if config.guarded_paper_submission_enabled() {
@@ -126,18 +197,19 @@ pub fn build_order_intents(
         }
 
         let estimated_credit = candidate.option_bid * 100.0;
-        let estimated_net_debit = estimated_stock_cost - estimated_credit;
-        let max_profit = candidate.expiration_profit_per_share * 100.0;
+        let estimated_net_debit = combo_limit_price * 100.0;
+        let max_profit = expiration_profit_per_share * 100.0;
 
         intents.push(OrderIntent {
             symbol: candidate.symbol.clone(),
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: account.account.clone(),
             mode: if config.guarded_paper_submission_enabled() {
-                "paper-stock-first".to_string()
+                "paper-combo-bag".to_string()
             } else {
                 "dry-run".to_string()
             },
+            combo_limit_price: Some(combo_limit_price),
             estimated_net_debit,
             estimated_credit,
             max_profit,
@@ -145,10 +217,11 @@ pub fn build_order_intents(
                 OrderLegIntent {
                     instrument_type: InstrumentType::Stock,
                     action: TradeAction::Buy,
+                    contract_id: Some(candidate.underlying_contract_id),
                     symbol: candidate.symbol.clone(),
                     description: format!("Buy 100 shares of {}", candidate.symbol),
                     quantity: 100,
-                    limit_price: Some(candidate.underlying_price),
+                    limit_price: Some(stock_ask),
                     expiry: None,
                     strike: None,
                     right: None,
@@ -160,6 +233,7 @@ pub fn build_order_intents(
                 OrderLegIntent {
                     instrument_type: InstrumentType::Option,
                     action: TradeAction::Sell,
+                    contract_id: Some(candidate.option_contract_id),
                     symbol: candidate.symbol.clone(),
                     description: format!(
                         "Sell 1 deep-ITM covered call {} {} {}",
@@ -181,6 +255,10 @@ pub fn build_order_intents(
     }
 
     (intents, rejections, open_positions)
+}
+
+fn round_to_cents(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }
 
 #[cfg(test)]
@@ -250,7 +328,10 @@ mod tests {
         let candidate = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
+            underlying_contract_id: 1001,
             underlying_price: 100.0,
+            underlying_ask: Some(100.1),
+            option_contract_id: 2001,
             strike: 103.0,
             expiry: "20260515".to_string(),
             right: "C".to_string(),
@@ -299,7 +380,10 @@ mod tests {
         let first = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
+            underlying_contract_id: 1001,
             underlying_price: 100.0,
+            underlying_ask: Some(100.1),
+            option_contract_id: 2001,
             strike: 103.0,
             expiry: "20260515".to_string(),
             right: "C".to_string(),
@@ -353,7 +437,10 @@ mod tests {
         let candidate = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
+            underlying_contract_id: 1001,
             underlying_price: 100.0,
+            underlying_ask: Some(100.1),
+            option_contract_id: 2001,
             strike: 103.0,
             expiry: "20260515".to_string(),
             right: "C".to_string(),
@@ -396,5 +483,105 @@ mod tests {
                 .iter()
                 .any(|rejection| { rejection.reason.contains("requires IBKR BUYING_POWER") })
         );
+    }
+
+    #[test]
+    fn builds_combo_bag_intent_from_stock_ask_minus_call_bid_minus_two_cents() {
+        let candidate = ScoredOptionCandidate {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+            underlying_contract_id: 1001,
+            underlying_price: 100.0,
+            underlying_ask: Some(100.10),
+            option_contract_id: 2001,
+            strike: 90.0,
+            expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 30,
+            option_bid: 14.0,
+            option_ask: Some(14.1),
+            delta: Some(0.8),
+            itm_depth_pct: 0.1,
+            downside_buffer_pct: 0.14,
+            expiration_profit_per_share: 4.0,
+            annualized_yield_pct: 20.0,
+            expiration_yield_pct: 4.0,
+            score: 0.2,
+        };
+
+        let (intents, rejections, _summary) = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[candidate],
+            &test_config(),
+        );
+
+        assert!(rejections.is_empty());
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].combo_limit_price, Some(86.08));
+        assert_eq!(intents[0].estimated_net_debit, 8_608.0);
+        assert_eq!(intents[0].legs[0].contract_id, Some(1001));
+        assert_eq!(intents[0].legs[1].contract_id, Some(2001));
+    }
+
+    #[test]
+    fn rejects_combo_bag_when_adjusted_debit_breaks_profit_thresholds() {
+        let candidate = ScoredOptionCandidate {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+            underlying_contract_id: 1001,
+            underlying_price: 100.0,
+            underlying_ask: Some(100.10),
+            option_contract_id: 2001,
+            strike: 99.5,
+            expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 30,
+            option_bid: 1.5,
+            option_ask: Some(1.6),
+            delta: Some(0.25),
+            itm_depth_pct: 0.03,
+            downside_buffer_pct: 0.15,
+            expiration_profit_per_share: 5.0,
+            annualized_yield_pct: 20.0,
+            expiration_yield_pct: 5.0,
+            score: 0.2,
+        };
+
+        let (intents, rejections, _summary) = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[candidate],
+            &AppConfig {
+                strategy: StrategyConfig {
+                    min_expiration_profit_per_share: 1.0,
+                    ..test_config().strategy
+                },
+                ..test_config()
+            },
+        );
+
+        assert!(intents.is_empty());
+        assert!(rejections.iter().any(|rejection| {
+            rejection.stage == "pricing"
+                && rejection.reason.contains("combo BAG debit")
+                && rejection.reason.contains("expiration profit")
+        }));
     }
 }
