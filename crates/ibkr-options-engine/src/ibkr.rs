@@ -4,13 +4,17 @@ use ibapi::accounts::types::AccountGroup;
 use ibapi::accounts::{AccountSummaryResult, AccountSummaryTags, PositionUpdate};
 use ibapi::market_data::MarketDataType;
 use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
+use ibapi::orders::Orders;
 use ibapi::prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol};
 use tokio::time::{Duration, timeout};
 use tracing::info;
 
 use crate::{
     config::{AppConfig, MarketDataMode},
-    models::{AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot},
+    models::{
+        AccountState, BrokerCompletedOrder, BrokerOpenOrder, InventoryPosition,
+        OptionQuoteSnapshot, UnderlyingSnapshot,
+    },
     strategy::parse_expiry_date,
 };
 
@@ -184,6 +188,81 @@ pub async fn fetch_positions(client: &Client) -> Result<Vec<InventoryPosition>> 
     }
 
     Ok(positions)
+}
+
+pub async fn fetch_open_orders(client: &Client, account: &str) -> Result<Vec<BrokerOpenOrder>> {
+    let mut subscription = client
+        .all_open_orders()
+        .await
+        .context("failed to request IBKR open orders")?;
+
+    let mut orders = Vec::new();
+    while let Some(result) = subscription.next().await {
+        match result.context("failed to receive open order update")? {
+            Orders::OrderData(order) => {
+                if order.order.account != account {
+                    continue;
+                }
+                orders.push(BrokerOpenOrder {
+                    account: order.order.account.clone(),
+                    order_id: order.order_id,
+                    client_id: order.order.client_id,
+                    perm_id: order.order.perm_id,
+                    symbol: order.contract.symbol.to_string(),
+                    security_type: order.contract.security_type.to_string(),
+                    action: format!("{:?}", order.order.action),
+                    total_quantity: order.order.total_quantity,
+                    order_type: format!("{:?}", order.order.order_type),
+                    limit_price: order.order.limit_price.filter(|price| *price > 0.0),
+                    status: order.order_state.status.clone(),
+                });
+            }
+            Orders::OrderStatus(_) | Orders::Notice(_) => {}
+        }
+    }
+
+    Ok(orders)
+}
+
+pub async fn fetch_completed_orders(
+    client: &Client,
+    account: &str,
+) -> Result<Vec<BrokerCompletedOrder>> {
+    let mut subscription = client
+        .completed_orders(false)
+        .await
+        .context("failed to request IBKR completed orders")?;
+
+    let mut orders = Vec::new();
+    while let Some(result) = subscription.next().await {
+        match result.context("failed to receive completed order update")? {
+            Orders::OrderData(order) => {
+                if order.order.account != account {
+                    continue;
+                }
+                orders.push(BrokerCompletedOrder {
+                    account: order.order.account.clone(),
+                    order_id: order.order_id,
+                    client_id: order.order.client_id,
+                    perm_id: order.order.perm_id,
+                    symbol: order.contract.symbol.to_string(),
+                    security_type: order.contract.security_type.to_string(),
+                    action: format!("{:?}", order.order.action),
+                    total_quantity: order.order.total_quantity,
+                    order_type: format!("{:?}", order.order.order_type),
+                    limit_price: order.order.limit_price.filter(|price| *price > 0.0),
+                    status: order.order_state.status.clone(),
+                    completed_status: order.order_state.completed_status.clone(),
+                    reject_reason: order.order_state.reject_reason.clone(),
+                    warning_text: order.order_state.warning_text.clone(),
+                    completed_time: order.order_state.completed_time.clone(),
+                });
+            }
+            Orders::OrderStatus(_) | Orders::Notice(_) => {}
+        }
+    }
+
+    Ok(orders)
 }
 
 pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) -> Result<i32> {

@@ -9,8 +9,8 @@ use chrono::Utc;
 use crate::{
     config::AppConfig,
     models::{
-        ExecutionRecord, GuardrailRejection, InstrumentType, OpenPositionState, OrderIntent,
-        PaperTradeLifecycleRecord,
+        BrokerCompletedOrder, BrokerOpenOrder, ExecutionRecord, GuardrailRejection, InstrumentType,
+        OpenPositionState, OrderIntent, PaperTradeLifecycleRecord,
     },
 };
 
@@ -100,9 +100,73 @@ impl PaperTradeLedger {
         }
     }
 
+    pub fn reconcile_with_broker_orders(
+        &mut self,
+        open_orders: &[BrokerOpenOrder],
+        completed_orders: &[BrokerCompletedOrder],
+        action_log: &mut Vec<String>,
+    ) {
+        for entry in &mut self.entries {
+            let open_order = open_orders
+                .iter()
+                .find(|order| broker_order_matches_entry(entry, order.order_id, &order.symbol));
+            if let Some(order) = open_order {
+                let broker_status = if order.status.is_empty() {
+                    "open".to_string()
+                } else {
+                    order.status.clone()
+                };
+                entry.status = format!(
+                    "broker-open-{}",
+                    broker_status.to_ascii_lowercase().replace(' ', "-")
+                );
+                entry.last_updated_at = Utc::now();
+                entry.note = format!(
+                    "IBKR currently reports order {} for {} as {} via {} {}",
+                    order.order_id, order.symbol, broker_status, order.action, order.order_type
+                );
+                action_log.push(format!(
+                    "{}: paper ledger refreshed from IBKR open orders and still sees order {} as {}.",
+                    entry.symbol, order.order_id, broker_status
+                ));
+                continue;
+            }
+
+            let completed_order = completed_orders
+                .iter()
+                .find(|order| broker_order_matches_entry(entry, order.order_id, &order.symbol));
+            if let Some(order) = completed_order {
+                let normalized_status = normalize_completed_status(order);
+                entry.status = normalized_status.to_string();
+                entry.last_updated_at = Utc::now();
+                entry.note = completed_order_note(order);
+                action_log.push(format!(
+                    "{}: paper ledger refreshed from IBKR completed orders and marked {} for order {}.",
+                    entry.symbol, normalized_status, order.order_id
+                ));
+                continue;
+            }
+
+            if entry_is_active(entry)
+                && entry.observed_stock_shares.abs() < f64::EPSILON
+                && entry.observed_short_call_contracts.abs() < f64::EPSILON
+                && (entry.stock_order_id.is_some() || entry.short_call_order_id.is_some())
+            {
+                entry.status = "broker-missing-cleared".to_string();
+                entry.last_updated_at = Utc::now();
+                entry.note = "IBKR no longer reports a matching open order, completed order, or open position; local idempotency hold was cleared for a fresh paper rerun".to_string();
+                action_log.push(format!(
+                    "{}: cleared stale paper-ledger state because IBKR no longer reports a matching order or position.",
+                    entry.symbol
+                ));
+            }
+        }
+    }
+
     pub fn reject_duplicate_intents(
         &self,
         intents: Vec<OrderIntent>,
+        open_orders: &[BrokerOpenOrder],
         guardrail_rejections: &mut Vec<GuardrailRejection>,
         action_log: &mut Vec<String>,
     ) -> Vec<OrderIntent> {
@@ -110,6 +174,25 @@ impl PaperTradeLedger {
 
         for intent in intents {
             let intent_key = intent_key(&intent);
+            if let Some(existing) = open_orders
+                .iter()
+                .find(|order| order.symbol == intent.symbol)
+            {
+                guardrail_rejections.push(GuardrailRejection {
+                    symbol: intent.symbol.clone(),
+                    stage: "idempotency".to_string(),
+                    reason: format!(
+                        "duplicate paper submission blocked because IBKR still reports open order {} for {} as {}",
+                        existing.order_id, existing.symbol, existing.status
+                    ),
+                });
+                action_log.push(format!(
+                    "{}: blocked duplicate paper submission for intent {} because IBKR still reports open order {} as {}.",
+                    intent.symbol, intent_key, existing.order_id, existing.status
+                ));
+                continue;
+            }
+
             if let Some(existing) = self.find_active(&intent.symbol) {
                 guardrail_rejections.push(GuardrailRejection {
                     symbol: intent.symbol.clone(),
@@ -268,8 +351,69 @@ impl PaperTradeLedger {
 fn entry_is_active(entry: &PaperTradeLifecycleRecord) -> bool {
     !matches!(
         entry.status.as_str(),
-        "rejected" | "cancelled" | "closed-observed"
+        "rejected" | "cancelled" | "closed-observed" | "broker-missing-cleared"
     )
+}
+
+fn broker_order_matches_entry(
+    entry: &PaperTradeLifecycleRecord,
+    order_id: i32,
+    symbol: &str,
+) -> bool {
+    entry.symbol == symbol
+        && (entry.stock_order_id == Some(order_id)
+            || entry.short_call_order_id == Some(order_id)
+            || (entry.stock_order_id.is_none()
+                && entry.short_call_order_id.is_none()
+                && entry.symbol == symbol))
+}
+
+fn normalize_completed_status(order: &BrokerCompletedOrder) -> &'static str {
+    let combined = format!(
+        "{} {} {} {}",
+        order.status, order.completed_status, order.reject_reason, order.warning_text
+    )
+    .to_ascii_lowercase();
+
+    if combined.contains("reject") || combined.contains("inactive") {
+        "rejected"
+    } else if combined.contains("cancel") || combined.contains("api cancel") {
+        "cancelled"
+    } else if combined.contains("fill") {
+        "filled"
+    } else {
+        "completed"
+    }
+}
+
+fn completed_order_note(order: &BrokerCompletedOrder) -> String {
+    let mut details = Vec::new();
+    if !order.completed_status.is_empty() {
+        details.push(format!("completed_status={}", order.completed_status));
+    }
+    if !order.reject_reason.is_empty() {
+        details.push(format!("reject_reason={}", order.reject_reason));
+    }
+    if !order.warning_text.is_empty() {
+        details.push(format!("warning={}", order.warning_text));
+    }
+    if !order.completed_time.is_empty() {
+        details.push(format!("completed_time={}", order.completed_time));
+    }
+    if details.is_empty() {
+        format!(
+            "IBKR completed order {} for {} with status {}",
+            order.order_id, order.symbol, order.status
+        )
+    } else {
+        format!(
+            "IBKR completed order {} for {} with status {} ({})",
+            order.order_id,
+            order.symbol,
+            order.status,
+            details.join(", ")
+        )
+    }
 }
 
 fn extract_order_ids(execution: &ExecutionRecord) -> (Option<i32>, Option<i32>) {
@@ -328,8 +472,9 @@ fn ledger_path(config: &AppConfig) -> PathBuf {
 mod tests {
     use super::PaperTradeLedger;
     use crate::models::{
-        ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, InstrumentType,
-        OpenPositionState, OrderIntent, OrderLegIntent, TradeAction,
+        BrokerCompletedOrder, BrokerOpenOrder, ExecutionLegRecord, ExecutionRecord,
+        FillReconciliationRecord, InstrumentType, OpenPositionState, OrderIntent, OrderLegIntent,
+        TradeAction,
     };
 
     fn intent(symbol: &str) -> OrderIntent {
@@ -421,6 +566,7 @@ mod tests {
 
         let retained = ledger.reject_duplicate_intents(
             vec![intent("AAPL"), intent("MSFT")],
+            &[],
             &mut Vec::new(),
             &mut Vec::new(),
         );
@@ -445,5 +591,218 @@ mod tests {
         ledger.reconcile_with_positions(&[], &mut Vec::new());
 
         assert_eq!(ledger.snapshot()[0].status, "closed-observed");
+    }
+
+    #[test]
+    fn clears_stale_tracked_symbol_when_ibkr_reports_no_order_or_position() {
+        let mut ledger = PaperTradeLedger::default();
+        ledger.record_execution_results(
+            &[ExecutionRecord {
+                symbol: "OPEN".to_string(),
+                status: "combo-submitted".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "submitted combo".to_string(),
+                legs: vec![
+                    ExecutionLegRecord {
+                        leg_symbol: "OPEN".to_string(),
+                        instrument_type: InstrumentType::Stock,
+                        action: TradeAction::Buy,
+                        quantity: 100,
+                        order_id: Some(3),
+                        submission_status: "PreSubmitted".to_string(),
+                        limit_price: Some(5.32),
+                        filled_quantity: 0.0,
+                        average_fill_price: None,
+                        execution_ids: Vec::new(),
+                        note: "submitted".to_string(),
+                    },
+                    ExecutionLegRecord {
+                        leg_symbol: "OPEN".to_string(),
+                        instrument_type: InstrumentType::Option,
+                        action: TradeAction::Sell,
+                        quantity: 1,
+                        order_id: Some(3),
+                        submission_status: "PreSubmitted".to_string(),
+                        limit_price: Some(0.76),
+                        filled_quantity: 0.0,
+                        average_fill_price: None,
+                        execution_ids: Vec::new(),
+                        note: "submitted".to_string(),
+                    },
+                ],
+                fill_reconciliation: Some(FillReconciliationRecord {
+                    stock_filled_shares: 0.0,
+                    stock_average_fill_price: None,
+                    short_call_filled_contracts: 0.0,
+                    short_call_average_fill_price: None,
+                    total_commission: None,
+                    eligible_for_short_call: false,
+                    uncovered_shares: 0.0,
+                    status: "combo-submitted".to_string(),
+                    note: "pending".to_string(),
+                }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+            }],
+            &[intent("OPEN")],
+            &mut Vec::new(),
+        );
+
+        ledger.reconcile_with_broker_orders(&[], &[], &mut Vec::new());
+
+        assert_eq!(ledger.snapshot()[0].status, "broker-missing-cleared");
+    }
+
+    #[test]
+    fn updates_tracked_symbol_from_completed_order_status() {
+        let mut ledger = PaperTradeLedger::default();
+        ledger.record_execution_results(
+            &[ExecutionRecord {
+                symbol: "OPEN".to_string(),
+                status: "combo-submitted".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "submitted combo".to_string(),
+                legs: vec![ExecutionLegRecord {
+                    leg_symbol: "OPEN".to_string(),
+                    instrument_type: InstrumentType::Stock,
+                    action: TradeAction::Buy,
+                    quantity: 100,
+                    order_id: Some(3),
+                    submission_status: "PreSubmitted".to_string(),
+                    limit_price: Some(5.32),
+                    filled_quantity: 0.0,
+                    average_fill_price: None,
+                    execution_ids: Vec::new(),
+                    note: "submitted".to_string(),
+                }],
+                fill_reconciliation: Some(FillReconciliationRecord {
+                    stock_filled_shares: 0.0,
+                    stock_average_fill_price: None,
+                    short_call_filled_contracts: 0.0,
+                    short_call_average_fill_price: None,
+                    total_commission: None,
+                    eligible_for_short_call: false,
+                    uncovered_shares: 0.0,
+                    status: "combo-submitted".to_string(),
+                    note: "pending".to_string(),
+                }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+            }],
+            &[intent("OPEN")],
+            &mut Vec::new(),
+        );
+
+        ledger.reconcile_with_broker_orders(
+            &[],
+            &[BrokerCompletedOrder {
+                account: "DU123".to_string(),
+                order_id: 3,
+                client_id: 100,
+                perm_id: 1,
+                symbol: "OPEN".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(4.54),
+                status: "Cancelled".to_string(),
+                completed_status: "Cancelled".to_string(),
+                reject_reason: String::new(),
+                warning_text: String::new(),
+                completed_time: "20260420 12:53:00 America/Denver".to_string(),
+            }],
+            &mut Vec::new(),
+        );
+
+        assert_eq!(ledger.snapshot()[0].status, "cancelled");
+    }
+
+    #[test]
+    fn keeps_tracked_symbol_active_when_ibkr_reports_open_order() {
+        let mut ledger = PaperTradeLedger::default();
+        ledger.record_execution_results(
+            &[ExecutionRecord {
+                symbol: "OPEN".to_string(),
+                status: "combo-submitted".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "submitted combo".to_string(),
+                legs: vec![ExecutionLegRecord {
+                    leg_symbol: "OPEN".to_string(),
+                    instrument_type: InstrumentType::Stock,
+                    action: TradeAction::Buy,
+                    quantity: 100,
+                    order_id: Some(3),
+                    submission_status: "PreSubmitted".to_string(),
+                    limit_price: Some(5.32),
+                    filled_quantity: 0.0,
+                    average_fill_price: None,
+                    execution_ids: Vec::new(),
+                    note: "submitted".to_string(),
+                }],
+                fill_reconciliation: Some(FillReconciliationRecord {
+                    stock_filled_shares: 0.0,
+                    stock_average_fill_price: None,
+                    short_call_filled_contracts: 0.0,
+                    short_call_average_fill_price: None,
+                    total_commission: None,
+                    eligible_for_short_call: false,
+                    uncovered_shares: 0.0,
+                    status: "combo-submitted".to_string(),
+                    note: "pending".to_string(),
+                }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+            }],
+            &[intent("OPEN")],
+            &mut Vec::new(),
+        );
+
+        ledger.reconcile_with_broker_orders(
+            &[BrokerOpenOrder {
+                account: "DU123".to_string(),
+                order_id: 3,
+                client_id: 100,
+                perm_id: 1,
+                symbol: "OPEN".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(4.54),
+                status: "PreSubmitted".to_string(),
+            }],
+            &[],
+            &mut Vec::new(),
+        );
+
+        assert_eq!(ledger.snapshot()[0].status, "broker-open-presubmitted");
+    }
+
+    #[test]
+    fn blocks_duplicate_symbols_when_ibkr_reports_open_order_even_without_ledger_entry() {
+        let ledger = PaperTradeLedger::default();
+
+        let retained = ledger.reject_duplicate_intents(
+            vec![intent("OPEN"), intent("MSFT")],
+            &[BrokerOpenOrder {
+                account: "DU123".to_string(),
+                order_id: 3,
+                client_id: 100,
+                perm_id: 1,
+                symbol: "OPEN".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(4.54),
+                status: "PreSubmitted".to_string(),
+            }],
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].symbol, "MSFT");
     }
 }

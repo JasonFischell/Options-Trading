@@ -235,6 +235,14 @@ where
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
 
     if config.guarded_paper_submission_enabled() {
+        let open_orders = provider.load_open_orders().await?;
+        let completed_orders = provider.load_completed_orders().await?;
+        paper_trade_ledger.reconcile_with_broker_orders(
+            &open_orders,
+            &completed_orders,
+            &mut action_log,
+        );
+
         let blocked_symbols = proposed_orders
             .iter()
             .filter(|intent| non_live_symbols.contains(&intent.symbol))
@@ -268,6 +276,7 @@ where
 
         proposed_orders = paper_trade_ledger.reject_duplicate_intents(
             proposed_orders,
+            &open_orders,
             &mut guardrail_rejections,
             &mut action_log,
         );
@@ -285,6 +294,13 @@ where
             .iter()
             .any(|record| record.submission_mode == "paper" && record.symbol != "N/A")
     {
+        let refreshed_open_orders = provider.load_open_orders().await?;
+        let refreshed_completed_orders = provider.load_completed_orders().await?;
+        paper_trade_ledger.reconcile_with_broker_orders(
+            &refreshed_open_orders,
+            &refreshed_completed_orders,
+            &mut action_log,
+        );
         let refreshed_positions = provider.load_inventory().await?;
         open_positions = crate::state::summarize_open_positions(&refreshed_positions);
         paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
@@ -369,8 +385,8 @@ mod tests {
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
         models::{
-            AccountState, ExecutionRecord, InventoryPosition, OptionQuoteSnapshot,
-            UnderlyingSnapshot, UniverseRecord,
+            AccountState, BrokerCompletedOrder, BrokerOpenOrder, ExecutionRecord,
+            InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord,
         },
         scanner::run_scan_cycle,
     };
@@ -378,6 +394,8 @@ mod tests {
     struct ReplayProvider {
         account: AccountState,
         positions: Vec<InventoryPosition>,
+        open_orders: Vec<BrokerOpenOrder>,
+        completed_orders: Vec<BrokerCompletedOrder>,
         symbols: HashMap<String, SymbolMarketSnapshot>,
     }
 
@@ -389,6 +407,14 @@ mod tests {
 
         async fn load_inventory(&self) -> Result<Vec<InventoryPosition>> {
             Ok(self.positions.clone())
+        }
+
+        async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>> {
+            Ok(self.open_orders.clone())
+        }
+
+        async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>> {
+            Ok(self.completed_orders.clone())
         }
 
         async fn fetch_symbol_snapshot(
@@ -541,6 +567,8 @@ mod tests {
                     net_liquidation: Some(30_000.0),
                 },
                 positions: Vec::new(),
+                open_orders: Vec::new(),
+                completed_orders: Vec::new(),
                 symbols,
             },
             &RecordingExecutor::default(),
@@ -620,6 +648,8 @@ mod tests {
                     net_liquidation: Some(30_000.0),
                 },
                 positions: Vec::new(),
+                open_orders: Vec::new(),
+                completed_orders: Vec::new(),
                 symbols,
             },
             &executor,
@@ -734,6 +764,20 @@ mod tests {
                     net_liquidation: Some(30_000.0),
                 },
                 positions: Vec::new(),
+                open_orders: vec![BrokerOpenOrder {
+                    account: "DU123".to_string(),
+                    order_id: 10,
+                    client_id: 100,
+                    perm_id: 99,
+                    symbol: "AAPL".to_string(),
+                    security_type: "BAG".to_string(),
+                    action: "BUY".to_string(),
+                    total_quantity: 1.0,
+                    order_type: "LMT".to_string(),
+                    limit_price: Some(86.08),
+                    status: "PreSubmitted".to_string(),
+                }],
+                completed_orders: Vec::new(),
                 symbols,
             },
             &executor,

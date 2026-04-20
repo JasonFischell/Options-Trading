@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use ibapi::{
     contracts::{ComboLeg, ComboLegOpenClose},
     orders::{
-        Action, CommissionReport, ExecutionData, Order, OrderStatus, PlaceOrder, TagValue,
-        order_builder,
+        Action, CommissionReport, ExecutionData, Order, OrderData, OrderStatus, PlaceOrder,
+        TagValue, order_builder,
     },
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
@@ -64,6 +64,7 @@ impl OrderExecutor for GuardedDryRunExecutor {
 
 #[derive(Debug, Clone)]
 enum BrokerOrderEvent {
+    OpenOrder(OrderData),
     OrderStatus(OrderStatus),
     ExecutionData(ExecutionData),
     CommissionReport(CommissionReport),
@@ -166,6 +167,7 @@ impl BrokerOrderGateway for IbkrOrderGateway {
             let event = match result
                 .with_context(|| format!("failed while monitoring IBKR order {order_id}"))?
             {
+                PlaceOrder::OpenOrder(order) => BrokerOrderEvent::OpenOrder(order),
                 PlaceOrder::OrderStatus(status) => BrokerOrderEvent::OrderStatus(status),
                 PlaceOrder::ExecutionData(data) => BrokerOrderEvent::ExecutionData(data),
                 PlaceOrder::CommissionReport(report) => BrokerOrderEvent::CommissionReport(report),
@@ -173,7 +175,6 @@ impl BrokerOrderGateway for IbkrOrderGateway {
                     code: notice.code,
                     message: notice.message,
                 },
-                PlaceOrder::OpenOrder(_) => continue,
             };
 
             events.push(TimedBrokerOrderEvent {
@@ -357,12 +358,8 @@ where
                 self.idle_timeout,
             )
             .await?;
-        let broker_event_log_path = persist_broker_event_log(
-            &intent.symbol,
-            &intent.account,
-            order_id,
-            &events,
-        )?;
+        let broker_event_log_path =
+            persist_broker_event_log(&intent.symbol, &intent.account, order_id, &events)?;
 
         Ok(SubmittedOrderOutcome {
             order_id,
@@ -438,6 +435,7 @@ fn broker_event_timeline(outcome: &SubmittedOrderOutcome) -> Vec<BrokerEventTime
 
 fn broker_event_type_label(event: &BrokerOrderEvent) -> &'static str {
     match event {
+        BrokerOrderEvent::OpenOrder(_) => "openOrder",
         BrokerOrderEvent::OrderStatus(_) => "orderStatus",
         BrokerOrderEvent::ExecutionData(_) => "executionData",
         BrokerOrderEvent::CommissionReport(_) => "commissionReport",
@@ -447,6 +445,15 @@ fn broker_event_type_label(event: &BrokerOrderEvent) -> &'static str {
 
 fn broker_event_detail(event: &BrokerOrderEvent) -> String {
     match event {
+        BrokerOrderEvent::OpenOrder(order) => format!(
+            "order_id={} status={} action={:?} order_type={:?} total_quantity={} limit_price={:?}",
+            order.order_id,
+            order.order_state.status,
+            order.order.action,
+            order.order.order_type,
+            order.order.total_quantity,
+            order.order.limit_price
+        ),
         BrokerOrderEvent::OrderStatus(status) => format!(
             "status={} filled={} remaining={} avg_fill_price={} last_fill_price={} why_held={}",
             status.status,
@@ -466,10 +473,7 @@ fn broker_event_detail(event: &BrokerOrderEvent) -> String {
         ),
         BrokerOrderEvent::CommissionReport(report) => format!(
             "execution_id={} commission={} currency={} realized_pnl={:?}",
-            report.execution_id,
-            report.commission,
-            report.currency,
-            report.realized_pnl
+            report.execution_id, report.commission, report.currency, report.realized_pnl
         ),
         BrokerOrderEvent::Message { code, message } => format!("code={code} message={message}"),
     }
@@ -482,7 +486,8 @@ fn persist_broker_event_log(
     events: &[TimedBrokerOrderEvent],
 ) -> Result<std::path::PathBuf> {
     let logs_dir = Path::new("logs");
-    fs::create_dir_all(logs_dir).context("failed to create logs directory for broker event logs")?;
+    fs::create_dir_all(logs_dir)
+        .context("failed to create logs directory for broker event logs")?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let path = logs_dir.join(format!(
         "ibkr-order-events-{}-{}-{}-{}.json",
@@ -609,6 +614,7 @@ fn summarize_leg_outcome(
 
     for timed_event in &outcome.events {
         match &timed_event.event {
+            BrokerOrderEvent::OpenOrder(_) => {}
             BrokerOrderEvent::OrderStatus(order_status) => {
                 if !order_status.status.is_empty() {
                     status = order_status.status.clone();

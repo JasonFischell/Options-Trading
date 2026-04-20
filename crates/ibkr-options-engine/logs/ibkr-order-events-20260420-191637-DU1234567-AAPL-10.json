@@ -1,0 +1,8 @@
+[
+  {
+    "observed_at": "2026-04-20T19:16:37.213018300Z",
+    "elapsed_ms": 0,
+    "event_type": "orderStatus",
+    "detail": "status=Submitted filled=0 remaining=1 avg_fill_price=0 last_fill_price=0 why_held="
+  }
+]

@@ -217,6 +217,40 @@ pub struct OpenPositionState {
     pub average_stock_cost: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerOpenOrder {
+    pub account: String,
+    pub order_id: i32,
+    pub client_id: i32,
+    pub perm_id: i32,
+    pub symbol: String,
+    pub security_type: String,
+    pub action: String,
+    pub total_quantity: f64,
+    pub order_type: String,
+    pub limit_price: Option<f64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerCompletedOrder {
+    pub account: String,
+    pub order_id: i32,
+    pub client_id: i32,
+    pub perm_id: i32,
+    pub symbol: String,
+    pub security_type: String,
+    pub action: String,
+    pub total_quantity: f64,
+    pub order_type: String,
+    pub limit_price: Option<f64>,
+    pub status: String,
+    pub completed_status: String,
+    pub reject_reason: String,
+    pub warning_text: String,
+    pub completed_time: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstrumentType {
     Stock,

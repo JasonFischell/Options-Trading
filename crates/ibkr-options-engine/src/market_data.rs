@@ -12,13 +12,15 @@ use crate::{
     config::{AppConfig, MarketDataMode},
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
-        fetch_positions, is_invalid_option_contract_error, log_server_time, market_data_mode_label,
+        fetch_completed_orders, fetch_open_orders, fetch_positions,
+        is_invalid_option_contract_error, log_server_time, market_data_mode_label,
         request_option_chain_for_underlying, request_option_quote,
         request_underlying_snapshot_for_contract, resolve_primary_stock_contract,
         select_buy_write_contracts, switch_market_data_mode,
     },
     models::{
-        AccountState, InventoryPosition, OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord,
+        AccountState, BrokerCompletedOrder, BrokerOpenOrder, InventoryPosition,
+        OptionQuoteSnapshot, UnderlyingSnapshot, UniverseRecord,
     },
 };
 
@@ -32,6 +34,8 @@ pub struct SymbolMarketSnapshot {
 pub trait MarketDataProvider {
     async fn load_account_state(&self) -> Result<AccountState>;
     async fn load_inventory(&self) -> Result<Vec<InventoryPosition>>;
+    async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>>;
+    async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>>;
     async fn fetch_symbol_snapshot(
         &self,
         record: &UniverseRecord,
@@ -69,6 +73,14 @@ impl MarketDataProvider for IbkrMarketDataProvider {
 
     async fn load_inventory(&self) -> Result<Vec<InventoryPosition>> {
         fetch_positions(&self.client).await
+    }
+
+    async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>> {
+        fetch_open_orders(&self.client, &self.account).await
+    }
+
+    async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>> {
+        fetch_completed_orders(&self.client, &self.account).await
     }
 
     async fn fetch_symbol_snapshot(
