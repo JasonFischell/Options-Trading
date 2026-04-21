@@ -632,7 +632,7 @@ pub fn select_buy_write_contracts(
     }
 
     candidates.sort_by(|left, right| {
-        left.expiration.cmp(&right.expiration).then_with(|| {
+        right.expiration.cmp(&left.expiration).then_with(|| {
             right
                 .strike
                 .partial_cmp(&left.strike)
@@ -1238,5 +1238,54 @@ mod tests {
                 .iter()
                 .all(|contract| contract.expiration == target_expiry)
         );
+    }
+
+    #[test]
+    fn prioritizes_later_expiries_when_truncating_selected_contracts() {
+        let near_expiry = (Utc::now().date_naive() + Duration::days(31))
+            .format("%Y%m%d")
+            .to_string();
+        let far_expiry = (Utc::now().date_naive() + Duration::days(45))
+            .format("%Y%m%d")
+            .to_string();
+        let chains = vec![OptionChainSummary {
+            underlying_contract_id: 123,
+            trading_class: "OPEN".to_string(),
+            multiplier: "100".to_string(),
+            exchange: "SMART".to_string(),
+            expirations: vec![near_expiry, far_expiry.clone()],
+            strikes: vec![4.5, 4.0, 3.5],
+        }];
+        let config = AppConfig {
+            host: "127.0.0.1".to_string(),
+            platform: BrokerPlatform::Gateway,
+            port: 4002,
+            client_id: 100,
+            account: "DU123456".to_string(),
+            mode: RuntimeMode::Paper,
+            read_only: true,
+            connect_on_start: false,
+            run_mode: RunMode::Manual,
+            scan_schedule: "manual".to_string(),
+            market_data_mode: MarketDataMode::Live,
+            universe_file: None,
+            symbols: vec!["OPEN".to_string()],
+            startup_warnings: Vec::new(),
+            strategy: StrategyConfig {
+                min_expiry_days: 30,
+                max_expiry_days: 60,
+                min_itm_depth_pct: 0.01,
+                ..StrategyConfig::default()
+            },
+            risk: RiskConfig {
+                max_option_quotes_per_underlying: 2,
+                ..RiskConfig::default()
+            },
+        };
+
+        let selected = select_buy_write_contracts("OPEN", &chains, 5.9, &config).unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|contract| contract.expiration == far_expiry));
     }
 }

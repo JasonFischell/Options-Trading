@@ -7,7 +7,7 @@ use ibapi::{
     contracts::{ComboLeg, ComboLegOpenClose},
     orders::{
         Action, CommissionReport, ExecutionData, Order, OrderData, OrderStatus, PlaceOrder,
-        TagValue, order_builder,
+        TagValue, TimeInForce, order_builder,
     },
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
@@ -578,6 +578,11 @@ fn build_ibkr_combo_order(
         false,
     );
     order.account = intent.account.clone();
+    order.order_type = "LMT".to_string();
+    order.limit_price = Some(limit_price);
+    order.tif = TimeInForce::Day;
+    order.transmit = true;
+    order.outside_rth = false;
     order.order_ref = format!("deepitm-buywrite:{}:combo:buywrite", intent.symbol);
     order.smart_combo_routing_params = vec![TagValue {
         tag: "NonGuaranteed".to_string(),
@@ -819,7 +824,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ibapi::{
-        orders::{CommissionReport, Execution, ExecutionData, Order, OrderStatus},
+        orders::{CommissionReport, Execution, ExecutionData, Order, OrderStatus, TimeInForce},
         prelude::{Contract, SecurityType},
     };
     use tokio::time::Duration;
@@ -964,7 +969,11 @@ mod tests {
         assert_eq!(combo_contract.combo_legs[1].action, "SELL");
         assert_eq!(combo_order.account, "DU1234567");
         assert_eq!(combo_order.total_quantity, 1.0);
+        assert_eq!(combo_order.order_type, "LMT");
         assert_eq!(combo_order.limit_price, Some(86.0));
+        assert_eq!(combo_order.tif, TimeInForce::Day);
+        assert!(combo_order.transmit);
+        assert!(!combo_order.outside_rth);
         assert_eq!(combo_order.smart_combo_routing_params.len(), 1);
         assert_eq!(
             combo_order.smart_combo_routing_params[0].tag,
