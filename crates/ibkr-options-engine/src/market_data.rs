@@ -424,8 +424,8 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
-            StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         ibkr::{OptionChainMetadata, SelectedOptionContract},
         market_data::{delayed_retry_available, fetch_option_quotes_with, load_universe},
@@ -451,6 +451,9 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let universe = load_universe(&config).unwrap();
@@ -484,6 +487,9 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let universe = load_universe(&config).unwrap();

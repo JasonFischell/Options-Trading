@@ -415,8 +415,8 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
-            StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
@@ -559,6 +559,9 @@ mod tests {
                 max_underlying_price: 250.0,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         }
     }
 

@@ -975,7 +975,8 @@ mod tests {
         parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
-        AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+        AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
+        PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
     };
 
     #[test]
@@ -1012,6 +1013,9 @@ mod tests {
                 max_option_quotes_per_underlying: 2,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let selected = select_buy_write_contracts("PTON", &chains, 5.4, &config).unwrap();
@@ -1057,6 +1061,9 @@ mod tests {
                 max_option_quotes_per_underlying: 5,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let selected = select_buy_write_contracts("MARA", &chains, 6.0, &config).unwrap();
@@ -1112,6 +1119,9 @@ mod tests {
                 max_option_quotes_per_underlying: 2,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let selected = select_buy_write_contracts("AAPL", &chains, 120.0, &config).unwrap();
@@ -1220,6 +1230,9 @@ mod tests {
                 max_option_quotes_per_underlying: 2,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let selected = select_buy_write_contracts("AAPL", &chains, 100.0, &config).unwrap();
@@ -1272,6 +1285,9 @@ mod tests {
                 max_option_quotes_per_underlying: 2,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         };
 
         let selected = select_buy_write_contracts("OPEN", &chains, 5.9, &config).unwrap();

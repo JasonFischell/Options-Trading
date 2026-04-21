@@ -916,8 +916,8 @@ mod tests {
     };
     use crate::{
         config::{
-            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
-            StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{InstrumentType, OrderIntent, OrderLegIntent, TradeAction},
     };
@@ -1003,6 +1003,9 @@ mod tests {
                 enable_live_orders: false,
                 ..RiskConfig::default()
             },
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         }
     }
 

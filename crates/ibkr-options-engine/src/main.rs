@@ -1,11 +1,16 @@
 use anyhow::Result;
+use clap::Parser;
 use dotenvy::dotenv;
 use ibkr_options_engine::{
+    cli::{Cli, Command, ConfigArgs},
     config::AppConfig,
     execution::GuardedPaperOrderExecutor,
+    ibkr::{connect, fetch_completed_orders, fetch_open_orders, fetch_positions, log_server_time},
     market_data::{IbkrMarketDataProvider, load_universe},
+    paper_state::PaperTradeLedger,
     reporting::write_cycle_outputs,
     scanner::{build_scan_plan, run_scan_cycle},
+    state::summarize_open_positions,
 };
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -15,7 +20,15 @@ async fn main() -> Result<()> {
     dotenv().ok();
     init_tracing();
 
-    let config = AppConfig::from_env()?;
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Scan(ConfigArgs::default())) {
+        Command::Scan(args) => run_scan(args).await,
+        Command::Status(args) => run_status(args).await,
+    }
+}
+
+async fn run_scan(args: ConfigArgs) -> Result<()> {
+    let config = AppConfig::from_path(args.config.as_deref())?;
     let universe = load_universe(&config)?;
     let symbols = universe
         .iter()
@@ -69,6 +82,49 @@ async fn main() -> Result<()> {
         "Human-readable log: {}\nJSON report: {}",
         human_log_path.display(),
         json_report_path.display()
+    );
+
+    Ok(())
+}
+
+async fn run_status(args: ConfigArgs) -> Result<()> {
+    let config = AppConfig::from_path(args.config.as_deref())?;
+    for startup_warning in &config.startup_warnings {
+        warn!("{startup_warning}");
+    }
+
+    if !config.connect_on_start {
+        warn!("IBKR_CONNECT_ON_START is false; status output requires a broker connection");
+        return Ok(());
+    }
+
+    let client = connect(&config.endpoint(), config.client_id).await?;
+    log_server_time(&client).await?;
+
+    let positions = fetch_positions(&client).await?;
+    let open_positions = summarize_open_positions(&positions);
+    let open_orders = fetch_open_orders(&client, &config.account).await?;
+    let completed_orders = fetch_completed_orders(&client, &config.account).await?;
+    let mut ledger = PaperTradeLedger::load(&config)?;
+    let mut action_log = Vec::new();
+
+    ledger.reconcile_with_positions(&open_positions, &mut action_log);
+    ledger.reconcile_with_broker_orders(&open_orders, &completed_orders, &mut action_log);
+    ledger.persist(&config)?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "account": config.account,
+            "endpoint": config.endpoint(),
+            "capital_source": config.allocation.capital_source.label(),
+            "deployment_budget": config.allocation.deployment_budget,
+            "open_orders": open_orders,
+            "completed_orders": completed_orders,
+            "open_positions": open_positions,
+            "paper_trade_lifecycle_after_reconcile": ledger.snapshot(),
+            "action_log": action_log,
+        }))?
     );
 
     Ok(())

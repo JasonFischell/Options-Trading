@@ -287,8 +287,8 @@ fn max_debit_for_yield_floor(strike: f64, required_yield: f64) -> f64 {
 mod tests {
     use crate::{
         config::{
-            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
-            StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{AccountState, InventoryPosition, ScoredOptionCandidate},
         state::{build_order_intents, summarize_open_positions},
@@ -312,6 +312,9 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         }
     }
 

@@ -500,8 +500,8 @@ mod tests {
     use super::render_human_log;
     use crate::{
         config::{
-            AppConfig, BrokerPlatform, MarketDataMode, RiskConfig, RunMode, RuntimeMode,
-            StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{
             AccountState, CycleReport, ExecutionLegRecord, ExecutionRecord,
@@ -529,6 +529,9 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
             risk: RiskConfig::default(),
+            allocation: AllocationConfig::default(),
+            performance: PerformanceConfig::default(),
+            execution: ExecutionTuningConfig::default(),
         }
     }
 
