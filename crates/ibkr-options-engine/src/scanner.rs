@@ -1,12 +1,13 @@
 use anyhow::Result;
 use chrono::Utc;
-use std::collections::BTreeSet;
+use futures::{StreamExt, stream};
+use std::{collections::BTreeSet, time::Instant};
 
 use crate::{
     config::AppConfig,
     execution::OrderExecutor,
     market_data::{MarketDataProvider, load_universe},
-    models::{CycleReport, GuardrailRejection},
+    models::{CycleReport, CycleThroughputCounters, CycleTimingMetrics, GuardrailRejection},
     paper_state::PaperTradeLedger,
     state::build_order_intents,
     strategy::evaluate_buy_write_candidate,
@@ -54,6 +55,7 @@ where
     E: OrderExecutor,
 {
     let started_at = Utc::now();
+    let cycle_started = Instant::now();
     let universe = load_universe(config)?;
     let universe_symbols = universe
         .iter()
@@ -139,9 +141,35 @@ where
         }
     }
 
-    for record in &universe {
+    let symbol_concurrency = config.performance.symbol_concurrency.max(1);
+    let option_quote_concurrency = config
+        .performance
+        .option_quote_concurrency_per_symbol
+        .max(1);
+    provider.prepare_scan_cycle(config).await?;
+    action_log.push(format!(
+        "Prepared market-data mode {} once for this cycle with symbol_concurrency={} and option_quote_concurrency_per_symbol={}.",
+        crate::ibkr::market_data_mode_label(config.market_data_mode),
+        symbol_concurrency,
+        option_quote_concurrency
+    ));
+
+    let market_data_started = Instant::now();
+    let mut snapshot_results = stream::iter(universe.iter().cloned().enumerate().map(
+        |(index, record)| async move {
+            let snapshot = provider.fetch_symbol_snapshot(&record, config).await;
+            (index, record, snapshot)
+        },
+    ))
+    .buffer_unordered(symbol_concurrency)
+    .collect::<Vec<_>>()
+    .await;
+    snapshot_results.sort_by_key(|(index, _, _)| *index);
+    let market_data_elapsed_ms = market_data_started.elapsed().as_millis() as i64;
+
+    for (_, record, snapshot_result) in snapshot_results {
         symbols_scanned += 1;
-        let Some(snapshot) = provider.fetch_symbol_snapshot(record, config).await? else {
+        let Some(snapshot) = snapshot_result? else {
             guardrail_rejections.push(GuardrailRejection {
                 symbol: record.symbol.clone(),
                 stage: "market-data".to_string(),
@@ -215,7 +243,7 @@ where
                 ));
             }
             match evaluate_buy_write_candidate(
-                record,
+                &record,
                 &snapshot.underlying,
                 &option_quote,
                 &config.strategy,
@@ -352,6 +380,28 @@ where
         ));
     }
     let completed_at = Utc::now();
+    let timing_metrics = CycleTimingMetrics {
+        total_elapsed_ms: cycle_started.elapsed().as_millis() as i64,
+        market_data_elapsed_ms,
+    };
+    let throughput_counters = CycleThroughputCounters {
+        configured_symbol_concurrency: symbol_concurrency,
+        configured_option_quote_concurrency_per_symbol: option_quote_concurrency,
+        symbols_completed: symbols_scanned,
+        underlying_snapshots_completed: underlying_snapshots,
+        option_quotes_completed: option_quotes_considered,
+        symbols_per_second: per_second(symbols_scanned, market_data_elapsed_ms),
+        underlying_snapshots_per_second: per_second(underlying_snapshots, market_data_elapsed_ms),
+        option_quotes_per_second: per_second(option_quotes_considered, market_data_elapsed_ms),
+    };
+    action_log.push(format!(
+        "Cycle timing: total_elapsed_ms={}, market_data_elapsed_ms={}; throughput: symbols_per_second={:.2}, underlying_snapshots_per_second={:.2}, option_quotes_per_second={:.2}.",
+        timing_metrics.total_elapsed_ms,
+        timing_metrics.market_data_elapsed_ms,
+        throughput_counters.symbols_per_second,
+        throughput_counters.underlying_snapshots_per_second,
+        throughput_counters.option_quotes_per_second
+    ));
 
     Ok(CycleReport {
         started_at,
@@ -375,6 +425,8 @@ where
         non_live_symbols: non_live_symbols.into_iter().collect(),
         warnings,
         action_log,
+        timing_metrics,
+        throughput_counters,
         human_log_path: None,
         notes: vec![
             "Scanner currently uses short-lived snapshot-style requests instead of long-lived subscriptions to stay comfortably within IBKR market-data line limits."
@@ -406,17 +458,34 @@ fn should_cancel_unfilled_strategy_order(order: &crate::models::BrokerOpenOrder)
         && order.filled_quantity <= f64::EPSILON
 }
 
+fn per_second(count: usize, elapsed_ms: i64) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+
+    let elapsed_seconds = (elapsed_ms.max(1) as f64) / 1000.0;
+    (count as f64) / elapsed_seconds
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use anyhow::Result;
     use async_trait::async_trait;
 
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
-            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
+            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
@@ -434,10 +503,19 @@ mod tests {
         completed_orders: Mutex<Vec<BrokerCompletedOrder>>,
         cancelled_order_ids: Mutex<Vec<i32>>,
         symbols: HashMap<String, SymbolMarketSnapshot>,
+        delays_ms: HashMap<String, u64>,
+        prepare_calls: AtomicUsize,
+        active_requests: AtomicUsize,
+        max_active_requests: AtomicUsize,
     }
 
     #[async_trait(?Send)]
     impl MarketDataProvider for ReplayProvider {
+        async fn prepare_scan_cycle(&self, _config: &AppConfig) -> Result<()> {
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn load_account_state(&self) -> Result<AccountState> {
             Ok(self.account.clone())
         }
@@ -495,7 +573,14 @@ mod tests {
             record: &UniverseRecord,
             _config: &AppConfig,
         ) -> Result<Option<SymbolMarketSnapshot>> {
-            Ok(self.symbols.get(&record.symbol).cloned())
+            let active = self.active_requests.fetch_add(1, Ordering::SeqCst) + 1;
+            update_max(&self.max_active_requests, active);
+            if let Some(delay_ms) = self.delays_ms.get(&record.symbol).copied() {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let snapshot = self.symbols.get(&record.symbol).cloned();
+            self.active_requests.fetch_sub(1, Ordering::SeqCst);
+            Ok(snapshot)
         }
     }
 
@@ -562,6 +647,83 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+        }
+    }
+
+    fn test_account_state() -> AccountState {
+        AccountState {
+            account: "DU123".to_string(),
+            available_funds: Some(20_000.0),
+            buying_power: Some(20_000.0),
+            net_liquidation: Some(30_000.0),
+        }
+    }
+
+    fn replay_provider(symbols: HashMap<String, SymbolMarketSnapshot>) -> ReplayProvider {
+        ReplayProvider {
+            account: test_account_state(),
+            positions: Vec::new(),
+            open_orders: Mutex::new(Vec::new()),
+            completed_orders: Mutex::new(Vec::new()),
+            cancelled_order_ids: Mutex::new(Vec::new()),
+            symbols,
+            delays_ms: HashMap::new(),
+            prepare_calls: AtomicUsize::new(0),
+            active_requests: AtomicUsize::new(0),
+            max_active_requests: AtomicUsize::new(0),
+        }
+    }
+
+    fn update_max(target: &AtomicUsize, value: usize) {
+        loop {
+            let observed = target.load(Ordering::SeqCst);
+            if value <= observed {
+                break;
+            }
+            if target
+                .compare_exchange(observed, value, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    fn snapshot_for(symbol: &str, price: f64, strike: f64) -> SymbolMarketSnapshot {
+        SymbolMarketSnapshot {
+            underlying: UnderlyingSnapshot {
+                contract_id: 1,
+                symbol: symbol.to_string(),
+                price,
+                bid: Some(price - 0.1),
+                ask: Some(price + 0.1),
+                last: Some(price),
+                close: Some(price - 0.5),
+                implied_volatility: None,
+                beta: Some(1.1),
+                price_source: "realtime-or-frozen".to_string(),
+                market_data_notices: Vec::new(),
+            },
+            option_quotes: vec![OptionQuoteSnapshot {
+                contract_id: 2,
+                symbol: symbol.to_string(),
+                expiry: "20991217".to_string(),
+                strike,
+                right: "C".to_string(),
+                exchange: "SMART".to_string(),
+                trading_class: symbol.to_string(),
+                multiplier: "100".to_string(),
+                bid: Some(14.00),
+                ask: Some(14.30),
+                last: Some(14.10),
+                close: Some(13.80),
+                option_price: Some(14.10),
+                implied_volatility: Some(0.2),
+                delta: Some(0.8),
+                underlying_price: Some(price),
+                quote_source: Some("test".to_string()),
+                diagnostics: Vec::new(),
+            }],
         }
     }
 
@@ -634,19 +796,7 @@ mod tests {
         );
 
         let report = run_scan_cycle(
-            &ReplayProvider {
-                account: AccountState {
-                    account: "DU123".to_string(),
-                    available_funds: Some(20_000.0),
-                    buying_power: Some(20_000.0),
-                    net_liquidation: Some(30_000.0),
-                },
-                positions: Vec::new(),
-                open_orders: Mutex::new(Vec::new()),
-                completed_orders: Mutex::new(Vec::new()),
-                cancelled_order_ids: Mutex::new(Vec::new()),
-                symbols,
-            },
+            &replay_provider(symbols),
             &RecordingExecutor::default(),
             &test_config(),
         )
@@ -656,6 +806,73 @@ mod tests {
         assert_eq!(report.candidates_ranked, 1);
         assert_eq!(report.proposed_orders.len(), 1);
         assert!(report.paper_trade_lifecycle.is_empty());
+
+        clear_test_ledger_dir("DU123");
+    }
+
+    #[tokio::test]
+    async fn preserves_symbol_order_and_populates_throughput_metrics_under_concurrency() {
+        set_test_ledger_dir();
+        clear_test_ledger_dir("DU123");
+
+        let mut config = test_config();
+        config.symbols = vec!["AAPL".to_string(), "MSFT".to_string(), "NVDA".to_string()];
+        config.performance.symbol_concurrency = 2;
+        config.performance.option_quote_concurrency_per_symbol = 2;
+
+        let mut symbols = HashMap::new();
+        symbols.insert("AAPL".to_string(), snapshot_for("AAPL", 100.0, 90.0));
+        symbols.insert("MSFT".to_string(), snapshot_for("MSFT", 101.0, 91.0));
+        symbols.insert("NVDA".to_string(), snapshot_for("NVDA", 102.0, 92.0));
+
+        let mut provider = replay_provider(symbols);
+        provider.delays_ms.insert("AAPL".to_string(), 40);
+        provider.delays_ms.insert("MSFT".to_string(), 5);
+        provider.delays_ms.insert("NVDA".to_string(), 15);
+
+        let report = run_scan_cycle(&provider, &RecordingExecutor::default(), &config)
+            .await
+            .unwrap();
+
+        let aapl_log = report
+            .action_log
+            .iter()
+            .position(|entry| entry.contains("AAPL: underlying reference"))
+            .unwrap();
+        let msft_log = report
+            .action_log
+            .iter()
+            .position(|entry| entry.contains("MSFT: underlying reference"))
+            .unwrap();
+        let nvda_log = report
+            .action_log
+            .iter()
+            .position(|entry| entry.contains("NVDA: underlying reference"))
+            .unwrap();
+
+        assert!(aapl_log < msft_log);
+        assert!(msft_log < nvda_log);
+        assert_eq!(provider.prepare_calls.load(Ordering::SeqCst), 1);
+        assert!(provider.max_active_requests.load(Ordering::SeqCst) >= 2);
+        assert_eq!(report.symbols_scanned, 3);
+        assert_eq!(report.underlying_snapshots, 3);
+        assert_eq!(report.option_quotes_considered, 3);
+        assert!(
+            report.timing_metrics.total_elapsed_ms >= report.timing_metrics.market_data_elapsed_ms
+        );
+        assert!(report.timing_metrics.market_data_elapsed_ms > 0);
+        assert_eq!(report.throughput_counters.configured_symbol_concurrency, 2);
+        assert_eq!(
+            report
+                .throughput_counters
+                .configured_option_quote_concurrency_per_symbol,
+            2
+        );
+        assert_eq!(report.throughput_counters.symbols_completed, 3);
+        assert_eq!(report.throughput_counters.underlying_snapshots_completed, 3);
+        assert_eq!(report.throughput_counters.option_quotes_completed, 3);
+        assert!(report.throughput_counters.symbols_per_second > 0.0);
+        assert!(report.throughput_counters.option_quotes_per_second > 0.0);
 
         clear_test_ledger_dir("DU123");
     }
@@ -715,25 +932,9 @@ mod tests {
         );
 
         let executor = RecordingExecutor::default();
-        let report = run_scan_cycle(
-            &ReplayProvider {
-                account: AccountState {
-                    account: "DU123".to_string(),
-                    available_funds: Some(20_000.0),
-                    buying_power: Some(20_000.0),
-                    net_liquidation: Some(30_000.0),
-                },
-                positions: Vec::new(),
-                open_orders: Mutex::new(Vec::new()),
-                completed_orders: Mutex::new(Vec::new()),
-                cancelled_order_ids: Mutex::new(Vec::new()),
-                symbols,
-            },
-            &executor,
-            &config,
-        )
-        .await
-        .unwrap();
+        let report = run_scan_cycle(&replay_provider(symbols), &executor, &config)
+            .await
+            .unwrap();
 
         assert_eq!(report.candidates_ranked, 1);
         assert!(report.proposed_orders.is_empty());
@@ -833,12 +1034,6 @@ mod tests {
 
         let executor = RecordingExecutor::default();
         let provider = ReplayProvider {
-            account: AccountState {
-                account: "DU123".to_string(),
-                available_funds: Some(20_000.0),
-                buying_power: Some(20_000.0),
-                net_liquidation: Some(30_000.0),
-            },
             positions: Vec::new(),
             open_orders: Mutex::new(vec![BrokerOpenOrder {
                 account: "DU123".to_string(),
@@ -856,9 +1051,7 @@ mod tests {
                 filled_quantity: 0.0,
                 remaining_quantity: 1.0,
             }]),
-            completed_orders: Mutex::new(Vec::new()),
-            cancelled_order_ids: Mutex::new(Vec::new()),
-            symbols,
+            ..replay_provider(symbols)
         };
         let report = run_scan_cycle(&provider, &executor, &config).await.unwrap();
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use csv::StringRecord;
+use futures::{StreamExt, lock::Mutex as AsyncMutex, stream};
 use regex::Regex;
 use tracing::{info, warn};
 
@@ -12,8 +13,7 @@ use crate::{
     config::{AppConfig, MarketDataMode},
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, cancel_open_order, connect,
-        fetch_account_state,
-        fetch_completed_orders, fetch_open_orders, fetch_positions,
+        fetch_account_state, fetch_completed_orders, fetch_open_orders, fetch_positions,
         is_invalid_option_contract_error, log_server_time, market_data_mode_label,
         request_option_chain_for_underlying, request_option_quote,
         request_underlying_snapshot_for_contract, resolve_primary_stock_contract,
@@ -33,6 +33,10 @@ pub struct SymbolMarketSnapshot {
 
 #[async_trait(?Send)]
 pub trait MarketDataProvider {
+    async fn prepare_scan_cycle(&self, _config: &AppConfig) -> Result<()> {
+        Ok(())
+    }
+
     async fn load_account_state(&self) -> Result<AccountState>;
     async fn load_inventory(&self) -> Result<Vec<InventoryPosition>>;
     async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>>;
@@ -47,6 +51,8 @@ pub trait MarketDataProvider {
 
 pub struct IbkrMarketDataProvider {
     client: Arc<ibapi::prelude::Client>,
+    delayed_fallback_client: AsyncMutex<Option<Arc<ibapi::prelude::Client>>>,
+    delayed_fallback_descriptor: IbkrClientDescriptor,
     account: String,
 }
 
@@ -55,9 +61,20 @@ impl IbkrMarketDataProvider {
         let descriptor = IbkrClientDescriptor::from(config);
         let client = connect(&descriptor.endpoint, descriptor.client_id).await?;
         log_server_time(&client).await?;
+        let delayed_fallback_descriptor = IbkrClientDescriptor {
+            endpoint: descriptor.endpoint.clone(),
+            client_id: descriptor
+                .client_id
+                .checked_add(10_000)
+                .context("IBKR client id overflow while reserving delayed fallback client")?,
+            account: descriptor.account.clone(),
+            read_only: true,
+        };
 
         Ok(Self {
             client: Arc::new(client),
+            delayed_fallback_client: AsyncMutex::new(None),
+            delayed_fallback_descriptor,
             account: config.account.clone(),
         })
     }
@@ -65,10 +82,38 @@ impl IbkrMarketDataProvider {
     pub fn shared_client(&self) -> Arc<ibapi::prelude::Client> {
         self.client.clone()
     }
+
+    async fn delayed_fallback_client(&self) -> Result<Arc<ibapi::prelude::Client>> {
+        let mut delayed_fallback_client = self.delayed_fallback_client.lock().await;
+        if let Some(client) = delayed_fallback_client.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let client = connect(
+            &self.delayed_fallback_descriptor.endpoint,
+            self.delayed_fallback_descriptor.client_id,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect delayed fallback IBKR client at {} with client id {}",
+                self.delayed_fallback_descriptor.endpoint,
+                self.delayed_fallback_descriptor.client_id
+            )
+        })?;
+        switch_market_data_mode(&client, MarketDataMode::Delayed).await?;
+        let client = Arc::new(client);
+        *delayed_fallback_client = Some(client.clone());
+        Ok(client)
+    }
 }
 
 #[async_trait(?Send)]
 impl MarketDataProvider for IbkrMarketDataProvider {
+    async fn prepare_scan_cycle(&self, config: &AppConfig) -> Result<()> {
+        switch_market_data_mode(&self.client, config.market_data_mode).await
+    }
+
     async fn load_account_state(&self) -> Result<AccountState> {
         fetch_account_state(&self.client, &self.account).await
     }
@@ -94,7 +139,6 @@ impl MarketDataProvider for IbkrMarketDataProvider {
         record: &UniverseRecord,
         config: &AppConfig,
     ) -> Result<Option<SymbolMarketSnapshot>> {
-        switch_market_data_mode(&self.client, config.market_data_mode).await?;
         let primary_contract = resolve_primary_stock_contract(&self.client, &record.symbol).await?;
         let mut underlying = request_underlying_snapshot_for_contract(
             &self.client,
@@ -110,9 +154,9 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                 symbol = %record.symbol,
                 "live underlying snapshot was unavailable; retrying once with delayed market data"
             );
-            switch_market_data_mode(&self.client, MarketDataMode::Delayed).await?;
+            let delayed_fallback_client = self.delayed_fallback_client().await?;
             underlying = request_underlying_snapshot_for_contract(
-                &self.client,
+                delayed_fallback_client.as_ref(),
                 &record.symbol,
                 &primary_contract,
             )
@@ -121,7 +165,6 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                 "scanner retried with delayed market data after the live request returned no usable underlying price"
                     .to_string(),
             );
-            switch_market_data_mode(&self.client, config.market_data_mode).await?;
         }
         if underlying.beta.is_none() && record.beta > 0.0 {
             underlying.beta = Some(record.beta);
@@ -206,9 +249,11 @@ impl MarketDataProvider for IbkrMarketDataProvider {
                 }));
             }
         };
-        let option_quotes = fetch_option_quotes_with(&selected_contracts, |selected| {
-            request_option_quote(&self.client, selected)
-        })
+        let option_quotes = fetch_option_quotes_with(
+            &selected_contracts,
+            config.performance.option_quote_concurrency_per_symbol,
+            |selected| request_option_quote(&self.client, selected),
+        )
         .await?;
 
         for option_quote in &option_quotes {
@@ -388,18 +433,28 @@ fn parse_optional_f64(value: Option<&str>) -> Option<f64> {
 
 async fn fetch_option_quotes_with<F, Fut>(
     selected_contracts: &[SelectedOptionContract],
-    mut fetch_quote: F,
+    concurrency_limit: usize,
+    fetch_quote: F,
 ) -> Result<Vec<OptionQuoteSnapshot>>
 where
-    F: FnMut(SelectedOptionContract) -> Fut,
+    F: Fn(SelectedOptionContract) -> Fut,
     Fut: Future<Output = Result<OptionQuoteSnapshot>>,
 {
+    let mut quote_results = stream::iter(selected_contracts.iter().cloned().enumerate().map(
+        |(index, selected)| {
+            let request = fetch_quote(selected.clone());
+            async move { (index, selected, request.await) }
+        },
+    ))
+    .buffer_unordered(concurrency_limit.max(1))
+    .collect::<Vec<_>>()
+    .await;
+    quote_results.sort_by_key(|(index, _, _)| *index);
+
     let mut option_quotes = Vec::new();
 
-    for selected in selected_contracts {
-        let selected = selected.clone();
-
-        match fetch_quote(selected.clone()).await {
+    for (_, selected, result) in quote_results {
+        match result {
             Ok(option_quote) => option_quotes.push(option_quote),
             Err(error) if is_invalid_option_contract_error(&error) => {
                 warn!(
@@ -420,12 +475,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::Arc,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
-            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
+            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         ibkr::{OptionChainMetadata, SelectedOptionContract},
         market_data::{delayed_retry_available, fetch_option_quotes_with, load_universe},
@@ -502,6 +561,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preserves_option_quote_order_under_bounded_concurrency() {
+        let selected_contracts = vec![
+            SelectedOptionContract {
+                symbol: "AAPL".to_string(),
+                right: "C".to_string(),
+                expiration: "20991217".to_string(),
+                strike: 101.0,
+                chain_metadata: vec![OptionChainMetadata {
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    underlying_contract_id: 1,
+                }],
+            },
+            SelectedOptionContract {
+                symbol: "AAPL".to_string(),
+                right: "C".to_string(),
+                expiration: "20991217".to_string(),
+                strike: 102.0,
+                chain_metadata: vec![OptionChainMetadata {
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    underlying_contract_id: 1,
+                }],
+            },
+            SelectedOptionContract {
+                symbol: "AAPL".to_string(),
+                right: "C".to_string(),
+                expiration: "20991217".to_string(),
+                strike: 103.0,
+                chain_metadata: vec![OptionChainMetadata {
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    underlying_contract_id: 1,
+                }],
+            },
+        ];
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let option_quotes = fetch_option_quotes_with(&selected_contracts, 2, {
+            let in_flight = in_flight.clone();
+            let max_in_flight = max_in_flight.clone();
+            move |selected| {
+                let in_flight = in_flight.clone();
+                let max_in_flight = max_in_flight.clone();
+                async move {
+                    let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    while active > max_in_flight.load(Ordering::SeqCst) {
+                        if max_in_flight
+                            .compare_exchange(
+                                max_in_flight.load(Ordering::SeqCst),
+                                active,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            )
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+
+                    let pause = match selected.strike as i32 {
+                        101 => Duration::from_millis(40),
+                        102 => Duration::from_millis(5),
+                        103 => Duration::from_millis(15),
+                        _ => Duration::from_millis(1),
+                    };
+                    tokio::time::sleep(pause).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+
+                    Ok(OptionQuoteSnapshot {
+                        contract_id: selected.strike as i32,
+                        symbol: selected.symbol.clone(),
+                        expiry: selected.expiration.clone(),
+                        strike: selected.strike,
+                        right: selected.right.clone(),
+                        exchange: "SMART".to_string(),
+                        trading_class: "AAPL".to_string(),
+                        multiplier: "100".to_string(),
+                        bid: Some(1.25),
+                        ask: Some(1.35),
+                        last: Some(1.30),
+                        close: Some(1.20),
+                        option_price: Some(1.30),
+                        implied_volatility: Some(0.22),
+                        delta: Some(0.28),
+                        underlying_price: Some(100.0),
+                        quote_source: Some("test".to_string()),
+                        diagnostics: Vec::new(),
+                    })
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            option_quotes
+                .iter()
+                .map(|quote| quote.strike)
+                .collect::<Vec<_>>(),
+            vec![101.0, 102.0, 103.0]
+        );
+        assert!(max_in_flight.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
     async fn skips_invalid_contract_errors_and_continues_collecting_quotes() {
         let selected_contracts = vec![
             SelectedOptionContract {
@@ -530,38 +699,39 @@ mod tests {
             },
         ];
 
-        let option_quotes = fetch_option_quotes_with(&selected_contracts, |selected| async move {
-            if selected.strike == 101.0 {
-                return Err(anyhow::Error::new(ibapi::Error::Message(
-                    200,
-                    "No security definition has been found for the request".to_string(),
-                ))
-                .context("failed to resolve option contract details"));
-            }
+        let option_quotes =
+            fetch_option_quotes_with(&selected_contracts, 2, |selected| async move {
+                if selected.strike == 101.0 {
+                    return Err(anyhow::Error::new(ibapi::Error::Message(
+                        200,
+                        "No security definition has been found for the request".to_string(),
+                    ))
+                    .context("failed to resolve option contract details"));
+                }
 
-            Ok(OptionQuoteSnapshot {
-                contract_id: 2,
-                symbol: selected.symbol.clone(),
-                expiry: selected.expiration.clone(),
-                strike: selected.strike,
-                right: selected.right.clone(),
-                exchange: "SMART".to_string(),
-                trading_class: "AAPL".to_string(),
-                multiplier: "100".to_string(),
-                bid: Some(1.25),
-                ask: Some(1.35),
-                last: Some(1.30),
-                close: Some(1.20),
-                option_price: Some(1.30),
-                implied_volatility: Some(0.22),
-                delta: Some(0.28),
-                underlying_price: Some(100.0),
-                quote_source: Some("test".to_string()),
-                diagnostics: Vec::new(),
+                Ok(OptionQuoteSnapshot {
+                    contract_id: 2,
+                    symbol: selected.symbol.clone(),
+                    expiry: selected.expiration.clone(),
+                    strike: selected.strike,
+                    right: selected.right.clone(),
+                    exchange: "SMART".to_string(),
+                    trading_class: "AAPL".to_string(),
+                    multiplier: "100".to_string(),
+                    bid: Some(1.25),
+                    ask: Some(1.35),
+                    last: Some(1.30),
+                    close: Some(1.20),
+                    option_price: Some(1.30),
+                    implied_volatility: Some(0.22),
+                    delta: Some(0.28),
+                    underlying_price: Some(100.0),
+                    quote_source: Some("test".to_string()),
+                    diagnostics: Vec::new(),
+                })
             })
-        })
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
         assert_eq!(option_quotes.len(), 1);
         assert_eq!(option_quotes[0].strike, 102.0);

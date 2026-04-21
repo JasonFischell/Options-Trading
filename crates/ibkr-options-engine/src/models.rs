@@ -372,6 +372,24 @@ pub struct PaperTradeLifecycleRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleTimingMetrics {
+    pub total_elapsed_ms: i64,
+    pub market_data_elapsed_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleThroughputCounters {
+    pub configured_symbol_concurrency: usize,
+    pub configured_option_quote_concurrency_per_symbol: usize,
+    pub symbols_completed: usize,
+    pub underlying_snapshots_completed: usize,
+    pub option_quotes_completed: usize,
+    pub symbols_per_second: f64,
+    pub underlying_snapshots_per_second: f64,
+    pub option_quotes_per_second: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CycleReport {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
@@ -394,6 +412,8 @@ pub struct CycleReport {
     pub non_live_symbols: Vec<String>,
     pub warnings: Vec<String>,
     pub action_log: Vec<String>,
+    pub timing_metrics: CycleTimingMetrics,
+    pub throughput_counters: CycleThroughputCounters,
     pub human_log_path: Option<String>,
     pub notes: Vec<String>,
 }

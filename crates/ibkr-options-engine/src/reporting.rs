@@ -104,6 +104,20 @@ pub fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             report.symbols_scanned, report.underlying_snapshots, report.option_quotes_considered
         ),
         format!(
+            "Cycle timing: total {} ms, market data {} ms",
+            report.timing_metrics.total_elapsed_ms, report.timing_metrics.market_data_elapsed_ms
+        ),
+        format!(
+            "Throughput: symbol concurrency {} | option quote concurrency {} | symbols/sec {:.2} | underlying snapshots/sec {:.2} | option quotes/sec {:.2}",
+            report.throughput_counters.configured_symbol_concurrency,
+            report
+                .throughput_counters
+                .configured_option_quote_concurrency_per_symbol,
+            report.throughput_counters.symbols_per_second,
+            report.throughput_counters.underlying_snapshots_per_second,
+            report.throughput_counters.option_quotes_per_second
+        ),
+        format!(
             "Candidates ranked: {}, proposed orders: {}, execution records: {}, open positions: {}",
             report.candidates_ranked,
             report.proposed_orders.len(),
@@ -735,10 +749,11 @@ mod tests {
             PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{
-            AccountState, BrokerCompletedOrder, BrokerOpenOrder, CycleReport, ExecutionLegRecord,
-            ExecutionRecord, FillReconciliationRecord, GuardrailRejection, InstrumentType,
-            OpenPositionState, OrderIntent, OrderLegIntent, PaperTradeLifecycleRecord,
-            ScoredOptionCandidate, StatusReport, TradeAction,
+            AccountState, BrokerCompletedOrder, BrokerOpenOrder, CycleReport,
+            CycleThroughputCounters, CycleTimingMetrics, ExecutionLegRecord, ExecutionRecord,
+            FillReconciliationRecord, GuardrailRejection, InstrumentType, OpenPositionState,
+            OrderIntent, OrderLegIntent, PaperTradeLifecycleRecord, ScoredOptionCandidate,
+            StatusReport, TradeAction,
         },
     };
 
@@ -917,6 +932,20 @@ mod tests {
             non_live_symbols: Vec::new(),
             warnings: vec!["example warning".to_string()],
             action_log: vec!["example action".to_string()],
+            timing_metrics: CycleTimingMetrics {
+                total_elapsed_ms: 1_500,
+                market_data_elapsed_ms: 900,
+            },
+            throughput_counters: CycleThroughputCounters {
+                configured_symbol_concurrency: 4,
+                configured_option_quote_concurrency_per_symbol: 2,
+                symbols_completed: 1,
+                underlying_snapshots_completed: 1,
+                option_quotes_completed: 1,
+                symbols_per_second: 1.11,
+                underlying_snapshots_per_second: 1.11,
+                option_quotes_per_second: 1.11,
+            },
             human_log_path: None,
             notes: vec!["example note".to_string()],
         };
@@ -929,6 +958,8 @@ mod tests {
         assert!(log.contains("System State At Close:"));
         assert!(log.contains("Guardrail Rejections:"));
         assert!(log.contains("Outcome scoreboard:"));
+        assert!(log.contains("Cycle timing: total 1500 ms, market data 900 ms"));
+        assert!(log.contains("Throughput: symbol concurrency 4 | option quote concurrency 2"));
     }
 
     #[test]
