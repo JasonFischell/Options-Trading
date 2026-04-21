@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc, time::Instant};
+use std::{fs, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::time::{Duration, timeout};
 
 use crate::{
+    artifacts::logs_dir,
     config::{AppConfig, RuntimeMode},
     models::{
         BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord,
@@ -514,8 +515,8 @@ fn persist_broker_event_log(
     order_id: i32,
     events: &[TimedBrokerOrderEvent],
 ) -> Result<std::path::PathBuf> {
-    let logs_dir = Path::new("logs");
-    fs::create_dir_all(logs_dir)
+    let logs_dir = logs_dir();
+    fs::create_dir_all(&logs_dir)
         .context("failed to create logs directory for broker event logs")?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let path = logs_dir.join(format!(
@@ -916,8 +917,8 @@ mod tests {
     };
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
-            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
+            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{InstrumentType, OrderIntent, OrderLegIntent, TradeAction},
     };

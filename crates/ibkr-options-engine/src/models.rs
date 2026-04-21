@@ -398,6 +398,22 @@ pub struct CycleReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusReport {
+    pub account: String,
+    pub endpoint: String,
+    pub platform: String,
+    pub runtime_mode: String,
+    pub connect_on_start: bool,
+    pub capital_source: String,
+    pub deployment_budget: f64,
+    pub open_orders: Vec<BrokerOpenOrder>,
+    pub completed_orders: Vec<BrokerCompletedOrder>,
+    pub open_positions: Vec<OpenPositionState>,
+    pub paper_trade_lifecycle: Vec<PaperTradeLifecycleRecord>,
+    pub action_log: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::OptionQuoteSnapshot;

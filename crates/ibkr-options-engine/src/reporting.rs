@@ -1,23 +1,20 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Local;
 
 use crate::{
+    artifacts::logs_dir,
     config::AppConfig,
     models::{
         CycleReport, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, OrderIntent,
-        PaperTradeLifecycleRecord, ScoredOptionCandidate,
+        PaperTradeLifecycleRecord, ScoredOptionCandidate, StatusReport,
     },
 };
 
 pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<(PathBuf, PathBuf)> {
-    let logs_dir = Path::new("logs");
-    fs::create_dir_all(logs_dir).context("failed to create logs directory")?;
+    let logs_dir = logs_dir();
+    fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
 
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
     let base_name = format!(
@@ -46,7 +43,41 @@ pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<(
     Ok((human_log_path, json_report_path))
 }
 
-fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
+pub fn write_status_outputs(
+    config: &AppConfig,
+    report: &StatusReport,
+) -> Result<(PathBuf, PathBuf)> {
+    let logs_dir = logs_dir();
+    fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
+
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let base_name = format!(
+        "status-{}-{}-{}",
+        timestamp,
+        config
+            .platform
+            .label()
+            .to_ascii_lowercase()
+            .replace(' ', "-"),
+        config.account
+    );
+
+    let human_log_path = logs_dir.join(format!("{base_name}.log"));
+    let json_report_path = logs_dir.join(format!("{base_name}.json"));
+
+    fs::write(&human_log_path, render_status_log(config, report))
+        .with_context(|| format!("failed to write human log to {}", human_log_path.display()))?;
+    fs::write(&json_report_path, serde_json::to_string_pretty(report)?).with_context(|| {
+        format!(
+            "failed to write JSON report to {}",
+            json_report_path.display()
+        )
+    })?;
+
+    Ok((human_log_path, json_report_path))
+}
+
+pub fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
     let mut lines = vec![
         "IBKR Deep-ITM Scanner Run".to_string(),
         format!("Started: {}", report.started_at),
@@ -96,6 +127,7 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
         &mut lines,
         "Run Summary",
         vec![
+            format!("Outcome scoreboard: {}", render_scan_scoreboard(report)),
             format!(
                 "Candidate funnel: {} accepted -> {} proposed -> {} execution records",
                 report.accepted_candidates.len(),
@@ -215,6 +247,80 @@ fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
     lines.join("\n")
 }
 
+pub fn render_status_log(config: &AppConfig, report: &StatusReport) -> String {
+    let mut lines = vec![
+        "IBKR Paper Status".to_string(),
+        format!("Account: {}", report.account),
+        format!("Platform: {}", report.platform),
+        format!("Endpoint: {}", report.endpoint),
+        format!(
+            "Runtime: {:?}, connect_on_start={}",
+            config.mode, report.connect_on_start
+        ),
+        format!(
+            "Capital policy: source={} deployment_budget={:.2}",
+            report.capital_source, report.deployment_budget
+        ),
+        format!(
+            "At a glance: {} open position group(s), {} open order(s), {} completed order(s), {} paper ledger record(s)",
+            report.open_positions.len(),
+            report.open_orders.len(),
+            report.completed_orders.len(),
+            report.paper_trade_lifecycle.len()
+        ),
+        format!(
+            "Open-order statuses: {}",
+            render_status_counts(report.open_orders.iter().map(|order| {
+                if order.status.is_empty() {
+                    "open"
+                } else {
+                    order.status.as_str()
+                }
+            }))
+        ),
+        format!(
+            "Ledger statuses: {}",
+            render_status_counts(
+                report
+                    .paper_trade_lifecycle
+                    .iter()
+                    .map(|record| record.status.as_str())
+            )
+        ),
+    ];
+
+    append_section(
+        &mut lines,
+        "Open Positions",
+        render_status_positions(report),
+    );
+    append_section(&mut lines, "Open Orders", render_status_open_orders(report));
+    append_section(
+        &mut lines,
+        "Recent Completed Orders",
+        render_status_completed_orders(report),
+    );
+    append_section(
+        &mut lines,
+        "Paper Lifecycle Ledger",
+        render_status_lifecycle(report),
+    );
+
+    if !report.action_log.is_empty() {
+        append_section(
+            &mut lines,
+            "Reconcile Actions",
+            report
+                .action_log
+                .iter()
+                .map(|entry| format!("- {entry}"))
+                .collect(),
+        );
+    }
+
+    lines.join("\n")
+}
+
 fn append_section(lines: &mut Vec<String>, title: &str, content: Vec<String>) {
     if content.is_empty() {
         return;
@@ -240,6 +346,35 @@ fn render_status_counts<'a>(statuses: impl Iterator<Item = &'a str>) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn render_scan_scoreboard(report: &CycleReport) -> String {
+    let market_data_rejections = report
+        .guardrail_rejections
+        .iter()
+        .filter(|rejection| rejection.stage == "market-data")
+        .count();
+    let risk_rejections = report
+        .guardrail_rejections
+        .iter()
+        .filter(|rejection| rejection.stage == "risk")
+        .count();
+    let pricing_rejections = report
+        .guardrail_rejections
+        .iter()
+        .filter(|rejection| rejection.stage == "pricing")
+        .count();
+
+    format!(
+        "accepted={} | proposed={} | executed={} | guardrail_rejections={} (market-data={}, risk={}, pricing={})",
+        report.accepted_candidates.len(),
+        report.proposed_orders.len(),
+        report.execution_records.len(),
+        report.guardrail_rejections.len(),
+        market_data_rejections,
+        risk_rejections,
+        pricing_rejections
+    )
 }
 
 fn render_candidates(candidates: &[ScoredOptionCandidate]) -> Vec<String> {
@@ -487,6 +622,102 @@ fn render_action_log(report: &CycleReport) -> Vec<String> {
     lines
 }
 
+fn render_status_positions(report: &StatusReport) -> Vec<String> {
+    if report.open_positions.is_empty() {
+        return vec!["- No open stock/short-call position groups reported by IBKR.".to_string()];
+    }
+
+    report
+        .open_positions
+        .iter()
+        .map(|position| {
+            format!(
+                "- {} | shares {:.0} | short calls {:.0} | avg stock cost {}",
+                position.symbol,
+                position.stock_shares,
+                position.short_call_contracts,
+                format_optional_price(position.average_stock_cost)
+            )
+        })
+        .collect()
+}
+
+fn render_status_open_orders(report: &StatusReport) -> Vec<String> {
+    if report.open_orders.is_empty() {
+        return vec!["- No open orders currently reported by IBKR.".to_string()];
+    }
+
+    report
+        .open_orders
+        .iter()
+        .map(|order| {
+            format!(
+                "- {} | order_id={} | {} {} {} | status={} | qty filled {:.0}/{:.0} | limit {}",
+                order.symbol,
+                order.order_id,
+                order.action,
+                order.security_type,
+                order.order_type,
+                if order.status.is_empty() {
+                    "open"
+                } else {
+                    order.status.as_str()
+                },
+                order.filled_quantity,
+                order.total_quantity,
+                format_optional_price(order.limit_price)
+            )
+        })
+        .collect()
+}
+
+fn render_status_completed_orders(report: &StatusReport) -> Vec<String> {
+    if report.completed_orders.is_empty() {
+        return vec![
+            "- No completed orders returned by IBKR for this account snapshot.".to_string(),
+        ];
+    }
+
+    report
+        .completed_orders
+        .iter()
+        .take(10)
+        .map(|order| {
+            format!(
+                "- {} | order_id={} | {} {} {} | status={} | completed_status={} | completed_time={}",
+                order.symbol,
+                order.order_id,
+                order.action,
+                order.security_type,
+                order.order_type,
+                order.status,
+                if order.completed_status.is_empty() {
+                    "n/a"
+                } else {
+                    order.completed_status.as_str()
+                },
+                if order.completed_time.is_empty() {
+                    "n/a"
+                } else {
+                    order.completed_time.as_str()
+                }
+            )
+        })
+        .collect()
+}
+
+fn render_status_lifecycle(report: &StatusReport) -> Vec<String> {
+    if report.paper_trade_lifecycle.is_empty() {
+        return vec!["- Paper lifecycle ledger is currently empty.".to_string()];
+    }
+
+    report
+        .paper_trade_lifecycle
+        .iter()
+        .map(render_lifecycle_record)
+        .collect()
+}
+
 fn format_optional_price(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}"))
@@ -497,17 +728,17 @@ fn format_optional_price(value: Option<f64>) -> String {
 mod tests {
     use chrono::Utc;
 
-    use super::render_human_log;
+    use super::{render_human_log, render_status_log};
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig,
-            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
+            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{
-            AccountState, CycleReport, ExecutionLegRecord, ExecutionRecord,
-            FillReconciliationRecord, GuardrailRejection, InstrumentType, OpenPositionState,
-            OrderIntent, OrderLegIntent, PaperTradeLifecycleRecord, ScoredOptionCandidate,
-            TradeAction,
+            AccountState, BrokerCompletedOrder, BrokerOpenOrder, CycleReport, ExecutionLegRecord,
+            ExecutionRecord, FillReconciliationRecord, GuardrailRejection, InstrumentType,
+            OpenPositionState, OrderIntent, OrderLegIntent, PaperTradeLifecycleRecord,
+            ScoredOptionCandidate, StatusReport, TradeAction,
         },
     };
 
@@ -697,5 +928,84 @@ mod tests {
         assert!(log.contains("Execution Outcomes:"));
         assert!(log.contains("System State At Close:"));
         assert!(log.contains("Guardrail Rejections:"));
+        assert!(log.contains("Outcome scoreboard:"));
+    }
+
+    #[test]
+    fn status_log_surfaces_at_a_glance_rollups_and_ledger() {
+        let report = StatusReport {
+            account: "DU1234567".to_string(),
+            endpoint: "127.0.0.1:4002".to_string(),
+            platform: "IB Gateway".to_string(),
+            runtime_mode: "Paper".to_string(),
+            connect_on_start: true,
+            capital_source: "available_funds".to_string(),
+            deployment_budget: 10_000.0,
+            open_orders: vec![BrokerOpenOrder {
+                account: "DU1234567".to_string(),
+                order_id: 11,
+                client_id: 7,
+                perm_id: 99,
+                order_ref: "deepitm-buywrite:AAPL:combo:buywrite".to_string(),
+                symbol: "AAPL".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(89.25),
+                status: "Submitted".to_string(),
+                filled_quantity: 0.0,
+                remaining_quantity: 1.0,
+            }],
+            completed_orders: vec![BrokerCompletedOrder {
+                account: "DU1234567".to_string(),
+                order_id: 10,
+                client_id: 7,
+                perm_id: 98,
+                symbol: "MSFT".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(45.10),
+                status: "Filled".to_string(),
+                completed_status: "Filled".to_string(),
+                reject_reason: String::new(),
+                warning_text: String::new(),
+                completed_time: "20260421 14:00:00 America/Denver".to_string(),
+            }],
+            open_positions: vec![OpenPositionState {
+                symbol: "AAPL".to_string(),
+                stock_shares: 100.0,
+                short_call_contracts: 1.0,
+                average_stock_cost: Some(100.0),
+            }],
+            paper_trade_lifecycle: vec![PaperTradeLifecycleRecord {
+                symbol: "AAPL".to_string(),
+                intent_key: "intent".to_string(),
+                status: "open-covered-call".to_string(),
+                first_recorded_at: Utc::now(),
+                last_updated_at: Utc::now(),
+                hold_until_close: true,
+                stock_order_id: Some(11),
+                short_call_order_id: Some(11),
+                stock_filled_shares: 100.0,
+                short_call_filled_contracts: 1.0,
+                stock_average_fill_price: Some(100.0),
+                short_call_average_fill_price: Some(11.0),
+                observed_stock_shares: 100.0,
+                observed_short_call_contracts: 1.0,
+                note: "tracked".to_string(),
+            }],
+            action_log: vec!["AAPL: refreshed from broker snapshot.".to_string()],
+        };
+
+        let log = render_status_log(&test_config(), &report);
+
+        assert!(log.contains("At a glance: 1 open position group(s), 1 open order(s), 1 completed order(s), 1 paper ledger record(s)"));
+        assert!(log.contains("Open-order statuses: Submitted=1"));
+        assert!(log.contains("Ledger statuses: open-covered-call=1"));
+        assert!(log.contains("Paper Lifecycle Ledger:"));
+        assert!(log.contains("Recent Completed Orders:"));
     }
 }

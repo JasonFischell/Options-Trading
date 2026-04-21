@@ -1,12 +1,10 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::{
+    artifacts::logs_dir,
     config::AppConfig,
     models::{
         BrokerCompletedOrder, BrokerOpenOrder, ExecutionRecord, GuardrailRejection, InstrumentType,
@@ -465,7 +463,7 @@ fn ledger_path(config: &AppConfig) -> PathBuf {
             .join(format!("paper-trade-state-{}.json", config.account));
     }
 
-    Path::new("logs").join(format!("paper-trade-state-{}.json", config.account))
+    logs_dir().join(format!("paper-trade-state-{}.json", config.account))
 }
 
 #[cfg(test)]

@@ -7,8 +7,9 @@ use ibkr_options_engine::{
     execution::GuardedPaperOrderExecutor,
     ibkr::{connect, fetch_completed_orders, fetch_open_orders, fetch_positions, log_server_time},
     market_data::{IbkrMarketDataProvider, load_universe},
+    models::StatusReport,
     paper_state::PaperTradeLedger,
-    reporting::write_cycle_outputs,
+    reporting::{render_status_log, write_cycle_outputs, write_status_outputs},
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
 };
@@ -112,19 +113,32 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
     ledger.reconcile_with_broker_orders(&open_orders, &completed_orders, &mut action_log);
     ledger.persist(&config)?;
 
+    let report = StatusReport {
+        account: config.account.clone(),
+        endpoint: config.endpoint(),
+        platform: config.platform.label().to_string(),
+        runtime_mode: format!("{:?}", config.mode),
+        connect_on_start: config.connect_on_start,
+        capital_source: config.allocation.capital_source.label().to_string(),
+        deployment_budget: config.allocation.deployment_budget,
+        open_orders,
+        completed_orders,
+        open_positions,
+        paper_trade_lifecycle: ledger.snapshot(),
+        action_log,
+    };
+    let (human_log_path, json_report_path) = write_status_outputs(&config, &report)?;
+
+    info!(
+        human_log_path = %human_log_path.display(),
+        json_report_path = %json_report_path.display(),
+        "wrote status artifacts"
+    );
+    println!("{}", render_status_log(&config, &report));
     println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "account": config.account,
-            "endpoint": config.endpoint(),
-            "capital_source": config.allocation.capital_source.label(),
-            "deployment_budget": config.allocation.deployment_budget,
-            "open_orders": open_orders,
-            "completed_orders": completed_orders,
-            "open_positions": open_positions,
-            "paper_trade_lifecycle_after_reconcile": ledger.snapshot(),
-            "action_log": action_log,
-        }))?
+        "Human-readable log: {}\nJSON report: {}",
+        human_log_path.display(),
+        json_report_path.display()
     );
 
     Ok(())
