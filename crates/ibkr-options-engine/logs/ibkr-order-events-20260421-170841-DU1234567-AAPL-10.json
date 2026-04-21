@@ -1,0 +1,19 @@
+{
+  "symbol": "AAPL",
+  "account": "DU1234567",
+  "order_id": 10,
+  "event_count": 1,
+  "final_status": "Submitted",
+  "execution_count": 0,
+  "total_reported_commission": -0.0,
+  "message_count": 0,
+  "rejection_messages": [],
+  "timeline": [
+    {
+      "observed_at": "2026-04-21T17:08:41.597636900Z",
+      "elapsed_ms": 0,
+      "event_type": "orderStatus",
+      "detail": "status=Submitted filled=0 remaining=1 avg_fill_price=0 last_fill_price=0 why_held="
+    }
+  ]
+}

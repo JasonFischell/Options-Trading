@@ -384,6 +384,7 @@ pub struct CycleReport {
     pub underlying_snapshots: usize,
     pub option_quotes_considered: usize,
     pub candidates_ranked: usize,
+    pub accepted_candidates: Vec<ScoredOptionCandidate>,
     pub guardrail_rejections: Vec<GuardrailRejection>,
     pub proposed_orders: Vec<OrderIntent>,
     pub execution_records: Vec<ExecutionRecord>,

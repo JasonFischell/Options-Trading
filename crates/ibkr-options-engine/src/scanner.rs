@@ -365,6 +365,7 @@ where
         underlying_snapshots,
         option_quotes_considered,
         candidates_ranked: candidates.len(),
+        accepted_candidates: candidates,
         guardrail_rejections,
         proposed_orders,
         execution_records,
@@ -385,10 +386,10 @@ where
             } else if config.risk.enable_live_orders
                 || matches!(config.mode, crate::config::RuntimeMode::Live)
             {
-                "Live-order routing remains disabled; this cycle stayed on the guarded paper/dry-run path."
+                "Live-order routing remains disabled; this cycle stayed on the guarded paper/analysis-only path."
                     .to_string()
             } else {
-                "Deep-ITM covered-call buy-write execution remains on the guarded dry-run path until paper submission is explicitly enabled."
+                "Deep-ITM covered-call buy-write execution remains in analysis-only mode until paper submission is explicitly enabled."
                     .to_string()
             },
             "No automated exit strategy is implemented in this milestone; tracked paper positions remain hold-to-close only until IBKR reports them closed."
@@ -518,8 +519,8 @@ mod tests {
                 .iter()
                 .map(|intent| ExecutionRecord {
                     symbol: intent.symbol.clone(),
-                    status: "dry-run".to_string(),
-                    submission_mode: "dry-run".to_string(),
+                    status: "analysis-only".to_string(),
+                    submission_mode: "analysis-only".to_string(),
                     note: "recorded in test executor".to_string(),
                     legs: Vec::new(),
                     fill_reconciliation: None,
@@ -547,8 +548,7 @@ mod tests {
             symbols: vec!["AAPL".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_annualized_yield_pct: 0.01,
                 min_itm_depth_pct: 0.01,
                 min_downside_buffer_pct: 0.01,
@@ -861,7 +861,10 @@ mod tests {
 
         assert_eq!(report.proposed_orders.len(), 1);
         assert_eq!(executor.recorded.lock().unwrap().as_slice(), ["AAPL"]);
-        assert_eq!(provider.cancelled_order_ids.lock().unwrap().as_slice(), [10]);
+        assert_eq!(
+            provider.cancelled_order_ids.lock().unwrap().as_slice(),
+            [10]
+        );
 
         std::fs::remove_file(ledger_path).unwrap();
     }

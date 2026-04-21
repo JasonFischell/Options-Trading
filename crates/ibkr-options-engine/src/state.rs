@@ -207,7 +207,7 @@ pub fn build_order_intents(
             mode: if config.guarded_paper_submission_enabled() {
                 "paper-combo-bag".to_string()
             } else {
-                "dry-run".to_string()
+                "analysis-only".to_string()
             },
             combo_limit_price: Some(combo_limit_price),
             estimated_net_debit,

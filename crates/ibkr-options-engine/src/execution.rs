@@ -11,6 +11,7 @@ use ibapi::{
     },
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
+use serde::Serialize;
 use tokio::time::{Duration, timeout};
 
 use crate::{
@@ -31,10 +32,10 @@ pub trait OrderExecutor {
 }
 
 #[derive(Debug, Default)]
-pub struct GuardedDryRunExecutor;
+pub struct AnalysisOnlyExecutor;
 
 #[async_trait(?Send)]
-impl OrderExecutor for GuardedDryRunExecutor {
+impl OrderExecutor for AnalysisOnlyExecutor {
     async fn execute(
         &self,
         intents: &[OrderIntent],
@@ -42,14 +43,16 @@ impl OrderExecutor for GuardedDryRunExecutor {
     ) -> Result<Vec<ExecutionRecord>> {
         let mut records = intents
             .iter()
-            .map(|intent| dry_run_record(intent, config, dry_run_note(config), "dry-run"))
+            .map(|intent| {
+                analysis_only_record(intent, config, analysis_only_note(config), "analysis-only")
+            })
             .collect::<Vec<_>>();
 
         if intents.is_empty() {
             records.push(ExecutionRecord {
                 symbol: "N/A".to_string(),
                 status: "noop".to_string(),
-                submission_mode: "dry-run".to_string(),
+                submission_mode: "analysis-only".to_string(),
                 note: "no order intents passed all guardrails in this cycle".to_string(),
                 legs: Vec::new(),
                 fill_reconciliation: None,
@@ -94,6 +97,20 @@ struct LegFillSummary {
     execution_ids: Vec<String>,
     total_commission: Option<f64>,
     note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrokerEventLogArtifact {
+    symbol: String,
+    account: String,
+    order_id: i32,
+    event_count: usize,
+    final_status: Option<String>,
+    execution_count: usize,
+    total_reported_commission: f64,
+    message_count: usize,
+    rejection_messages: Vec<String>,
+    timeline: Vec<BrokerEventTimelineEntry>,
 }
 
 impl LegFillSummary {
@@ -153,7 +170,11 @@ impl BrokerOrderGateway for IbkrOrderGateway {
             let next_stream_item = match next_item {
                 Ok(item) => item,
                 Err(_) => {
-                    if started.elapsed() >= minimum_collection_window {
+                    if should_stop_collecting_broker_events(
+                        &events,
+                        started.elapsed(),
+                        minimum_collection_window,
+                    ) {
                         break;
                     }
                     continue;
@@ -182,6 +203,14 @@ impl BrokerOrderGateway for IbkrOrderGateway {
                 elapsed_ms: started.elapsed().as_millis() as i64,
                 event,
             });
+
+            if should_stop_collecting_broker_events(
+                &events,
+                started.elapsed(),
+                minimum_collection_window,
+            ) {
+                break;
+            }
         }
 
         Ok(events)
@@ -203,8 +232,8 @@ impl GuardedPaperOrderExecutor {
         Self {
             inner: GuardedPaperOrderExecutorInner {
                 gateway: IbkrOrderGateway::new(client),
-                minimum_collection_window: Duration::from_secs(60),
-                idle_timeout: Duration::from_secs(5),
+                minimum_collection_window: Duration::from_secs(3),
+                idle_timeout: Duration::from_secs(2),
             },
         }
     }
@@ -215,7 +244,7 @@ impl<G> GuardedPaperOrderExecutorInner<G> {
     fn new(gateway: G, idle_timeout: Duration) -> Self {
         Self {
             gateway,
-            minimum_collection_window: Duration::from_secs(60),
+            minimum_collection_window: Duration::from_secs(3),
             idle_timeout,
         }
     }
@@ -246,7 +275,7 @@ where
 
         for intent in intents {
             if config.risk.enable_live_orders || matches!(config.mode, RuntimeMode::Live) {
-                records.push(dry_run_record(
+                records.push(analysis_only_record(
                     intent,
                     config,
                     "live-order execution remains disabled; guarded paper routing only".to_string(),
@@ -256,11 +285,11 @@ where
             }
 
             if !paper_submission_enabled(config) {
-                records.push(dry_run_record(
+                records.push(analysis_only_record(
                     intent,
                     config,
-                    dry_run_note(config),
-                    "dry-run",
+                    analysis_only_note(config),
+                    "analysis-only",
                 ));
                 continue;
             }
@@ -272,7 +301,7 @@ where
             records.push(ExecutionRecord {
                 symbol: "N/A".to_string(),
                 status: "noop".to_string(),
-                submission_mode: "dry-run".to_string(),
+                submission_mode: "analysis-only".to_string(),
                 note: "no order intents passed all guardrails in this cycle".to_string(),
                 legs: Vec::new(),
                 fill_reconciliation: None,
@@ -374,7 +403,7 @@ fn paper_submission_enabled(config: &AppConfig) -> bool {
     config.guarded_paper_submission_enabled()
 }
 
-fn dry_run_note(config: &AppConfig) -> String {
+fn analysis_only_note(config: &AppConfig) -> String {
     if config.risk.enable_live_orders {
         "live-order execution remains disabled in this milestone".to_string()
     } else if config.risk.enable_paper_orders
@@ -384,11 +413,11 @@ fn dry_run_note(config: &AppConfig) -> String {
         "paper-order flag is enabled; combo BAG guarded submission will only run when a live IBKR client is attached"
             .to_string()
     } else {
-        "proposed dry-run order only; no broker submission attempted".to_string()
+        "proposed order only; broker submission is disabled for this run".to_string()
     }
 }
 
-fn dry_run_record(
+fn analysis_only_record(
     intent: &OrderIntent,
     config: &AppConfig,
     note: String,
@@ -400,7 +429,7 @@ fn dry_run_record(
         submission_mode: if paper_submission_enabled(config) {
             "paper".to_string()
         } else {
-            "dry-run".to_string()
+            "analysis-only".to_string()
         },
         note,
         legs: intent
@@ -502,13 +531,85 @@ fn persist_broker_event_log(
             detail: broker_event_detail(&event.event),
         })
         .collect::<Vec<_>>();
-    fs::write(&path, serde_json::to_string_pretty(&timeline)?).with_context(|| {
+    let artifact = BrokerEventLogArtifact {
+        symbol: symbol.to_string(),
+        account: account.to_string(),
+        order_id,
+        event_count: timeline.len(),
+        final_status: latest_broker_status(events),
+        execution_count: events
+            .iter()
+            .filter(|event| matches!(event.event, BrokerOrderEvent::ExecutionData(_)))
+            .count(),
+        total_reported_commission: events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BrokerOrderEvent::CommissionReport(report) => Some(report.commission),
+                _ => None,
+            })
+            .sum(),
+        message_count: events
+            .iter()
+            .filter(|event| matches!(event.event, BrokerOrderEvent::Message { .. }))
+            .count(),
+        rejection_messages: events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BrokerOrderEvent::Message { code, message } if (200..300).contains(code) => {
+                    Some(format!("{code}: {message}"))
+                }
+                _ => None,
+            })
+            .collect(),
+        timeline,
+    };
+    fs::write(&path, serde_json::to_string_pretty(&artifact)?).with_context(|| {
         format!(
             "failed to write IBKR broker event log to {}",
             path.display()
         )
     })?;
     Ok(path)
+}
+
+fn latest_broker_status(events: &[TimedBrokerOrderEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| match &event.event {
+        BrokerOrderEvent::OrderStatus(status) if !status.status.is_empty() => {
+            Some(status.status.clone())
+        }
+        BrokerOrderEvent::OpenOrder(order) if !order.order_state.status.is_empty() => {
+            Some(order.order_state.status.clone())
+        }
+        _ => None,
+    })
+}
+
+fn should_stop_collecting_broker_events(
+    events: &[TimedBrokerOrderEvent],
+    elapsed: Duration,
+    minimum_collection_window: Duration,
+) -> bool {
+    if broker_events_indicate_terminal_outcome(events) {
+        return true;
+    }
+
+    !events.is_empty() && elapsed >= minimum_collection_window
+}
+
+fn broker_events_indicate_terminal_outcome(events: &[TimedBrokerOrderEvent]) -> bool {
+    events.iter().any(|event| match &event.event {
+        BrokerOrderEvent::Message { code, .. } => (200..300).contains(code),
+        BrokerOrderEvent::OrderStatus(status) => is_terminal_order_status(&status.status),
+        BrokerOrderEvent::OpenOrder(order) => is_terminal_order_status(&order.order_state.status),
+        _ => false,
+    })
+}
+
+fn is_terminal_order_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "filled" | "cancelled" | "apicancelled" | "inactive"
+    )
 }
 
 fn build_ibkr_combo_contract(

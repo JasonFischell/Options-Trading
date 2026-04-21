@@ -10,6 +10,7 @@ $env:RUN_MODE='manual'
 $env:MARKET_DATA_MODE='live'
 $env:ENABLE_PAPER_ORDERS='true'
 $env:ENABLE_LIVE_ORDERS='false'
+$env:EXPIRATION_DATES='20260515'
 $env:UNIVERSE_FILE='docs/50_stocks_list.csv'
 
 cargo run -p ibkr-options-engine

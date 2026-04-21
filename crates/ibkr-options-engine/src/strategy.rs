@@ -80,26 +80,14 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    if let Some(target_expiry) = &config.target_expiry {
-        if normalized_expiry != *target_expiry {
-            return Err(GuardrailRejection {
-                symbol: record.symbol.clone(),
-                stage: "strategy".to_string(),
-                reason: format!(
-                    "expiry {} does not match configured TARGET_EXPIRY {}",
-                    option.expiry, target_expiry
-                ),
-            });
-        }
-    } else if days_to_expiration < config.min_expiry_days
-        || days_to_expiration > config.max_expiry_days
-    {
+    if !config.expiration_dates.contains(&normalized_expiry) {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
-                "expiry {} is outside {}-{} day window",
-                option.expiry, config.min_expiry_days, config.max_expiry_days
+                "expiry {} is not in configured EXPIRATION_DATES ({})",
+                option.expiry,
+                config.expiration_dates.join(", ")
             ),
         });
     }
@@ -290,9 +278,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let config = StrategyConfig {
-            target_expiry: Some("20991217".to_string()),
-            min_expiry_days: 1,
-            max_expiry_days: 36500,
+            expiration_dates: vec!["20991217".to_string()],
             min_annualized_yield_pct: 0.01,
             min_expiration_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
@@ -350,9 +336,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let config = StrategyConfig {
-            target_expiry: Some("20991217".to_string()),
-            min_expiry_days: 1,
-            max_expiry_days: 36500,
+            expiration_dates: vec!["20991217".to_string()],
             min_annualized_yield_pct: 0.01,
             min_expiration_yield_pct: 0.01,
             min_expiration_profit_per_share: 0.01,
@@ -464,9 +448,7 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
-                target_expiry: Some("20991217".to_string()),
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_annualized_yield_pct: 0.01,
                 min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.01,
@@ -525,9 +507,7 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
-                target_expiry: Some("20991217".to_string()),
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_annualized_yield_pct: 0.01,
                 min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.01,
@@ -589,9 +569,7 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
-                target_expiry: Some("20991217".to_string()),
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_annualized_yield_pct: 0.01,
                 min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.05,
@@ -650,9 +628,7 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
-                target_expiry: Some("20991217".to_string()),
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_annualized_yield_pct: 0.01,
                 min_expiration_yield_pct: 2.0,
                 min_expiration_profit_per_share: 0.01,
@@ -667,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_target_expiry_outside_default_day_window() {
+    fn allows_explicit_expiration_date_selection() {
         let target_expiry = (Utc::now().date_naive() + Duration::days(7))
             .format("%Y%m%d")
             .to_string();
@@ -714,9 +690,7 @@ mod tests {
             &underlying,
             &option,
             &StrategyConfig {
-                target_expiry: Some(target_expiry.clone()),
-                min_expiry_days: 30,
-                max_expiry_days: 60,
+                expiration_dates: vec![target_expiry.clone()],
                 min_annualized_yield_pct: 0.01,
                 min_expiration_yield_pct: 0.01,
                 min_expiration_profit_per_share: 0.01,

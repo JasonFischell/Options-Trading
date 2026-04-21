@@ -554,8 +554,8 @@ pub fn select_buy_write_contracts(
     let min_strike = reference_price * (1.0 - config.strategy.max_itm_depth_pct);
     let mut candidates: Vec<SelectedOptionContract> = Vec::new();
     let mut total_expirations = 0usize;
-    let mut expirations_in_window = 0usize;
-    let mut strikes_in_window = 0usize;
+    let mut expirations_matching_filter = 0usize;
+    let mut strikes_matching_filter = 0usize;
 
     for chain in chains {
         for expiration in &chain.expirations {
@@ -565,16 +565,12 @@ pub fn select_buy_write_contracts(
                 Err(_) => continue,
             };
             let days_to_expiration = (expiry_date - chrono::Utc::now().date_naive()).num_days();
-            if let Some(target_expiry) = &config.strategy.target_expiry {
-                if expiration != target_expiry {
-                    continue;
-                }
-            } else if days_to_expiration < config.strategy.min_expiry_days
-                || days_to_expiration > config.strategy.max_expiry_days
+            if days_to_expiration <= 0
+                || !config.strategy.expiration_dates.iter().any(|configured| configured == expiration)
             {
                 continue;
             }
-            expirations_in_window += 1;
+            expirations_matching_filter += 1;
 
             let mut strikes = chain
                 .strikes
@@ -587,7 +583,7 @@ pub fn select_buy_write_contracts(
                         && *strike <= max_strike
                 })
                 .collect::<Vec<_>>();
-            strikes_in_window += strikes.len();
+            strikes_matching_filter += strikes.len();
             strikes.sort_by(|left, right| {
                 right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -643,11 +639,12 @@ pub fn select_buy_write_contracts(
 
     if candidates.is_empty() {
         anyhow::bail!(
-            "no covered-call option contracts matched for {symbol}; reference_price={reference_price:.2}, min_strike={min_strike:.2}, max_strike={max_strike:.2}, chain_responses={}, expirations_seen={}, expirations_in_window={}, strikes_in_window={}",
+            "no covered-call option contracts matched for {symbol}; reference_price={reference_price:.2}, min_strike={min_strike:.2}, max_strike={max_strike:.2}, chain_responses={}, expirations_seen={}, expirations_matching_filter={}, strikes_matching_filter={}, configured_expirations={}",
             chains.len(),
             total_expirations,
-            expirations_in_window,
-            strikes_in_window
+            expirations_matching_filter,
+            strikes_matching_filter,
+            config.strategy.expiration_dates.join(",")
         );
     }
 
@@ -982,7 +979,7 @@ mod tests {
     };
 
     #[test]
-    fn selects_least_itm_contracts_first_within_the_allowed_window() {
+    fn selects_least_itm_contracts_first_within_allowed_expiration_dates() {
         let chains = vec![OptionChainSummary {
             underlying_contract_id: 123,
             trading_class: "PTON".to_string(),
@@ -1007,8 +1004,7 @@ mod tests {
             symbols: vec!["PTON".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string(), "21000121".to_string()],
                 min_itm_depth_pct: 0.05,
                 ..StrategyConfig::default()
             },
@@ -1020,7 +1016,7 @@ mod tests {
 
         let selected = select_buy_write_contracts("PTON", &chains, 5.4, &config).unwrap();
         assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].expiration, "20991217");
+        assert_eq!(selected[0].expiration, "21000121");
         assert_eq!(selected[0].right, "C");
         assert_eq!(selected[0].strike, 5.0);
         assert_eq!(selected[1].strike, 4.5);
@@ -1054,8 +1050,7 @@ mod tests {
             symbols: vec!["MARA".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -1109,8 +1104,7 @@ mod tests {
             symbols: vec!["AAPL".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                min_expiry_days: 1,
-                max_expiry_days: 36500,
+                expiration_dates: vec!["20991217".to_string()],
                 min_itm_depth_pct: 0.05,
                 ..StrategyConfig::default()
             },
@@ -1187,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn target_expiry_overrides_default_expiry_window() {
+    fn configured_expiration_dates_override_previous_day_window_logic() {
         let target_expiry = (Utc::now().date_naive() + Duration::days(7))
             .format("%Y%m%d")
             .to_string();
@@ -1218,9 +1212,7 @@ mod tests {
             symbols: vec!["AAPL".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                target_expiry: Some(target_expiry.clone()),
-                min_expiry_days: 30,
-                max_expiry_days: 60,
+                expiration_dates: vec![target_expiry.clone()],
                 min_itm_depth_pct: 0.01,
                 ..StrategyConfig::default()
             },
@@ -1272,8 +1264,7 @@ mod tests {
             symbols: vec!["OPEN".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
-                min_expiry_days: 30,
-                max_expiry_days: 60,
+                expiration_dates: vec![far_expiry.clone()],
                 min_itm_depth_pct: 0.01,
                 ..StrategyConfig::default()
             },

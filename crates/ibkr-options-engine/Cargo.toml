@@ -2,6 +2,7 @@
 name = "ibkr-options-engine"
 version = "0.1.0"
 edition = "2024"
+default-run = "ibkr-options-engine"
 
 [dependencies]
 anyhow = "1.0"

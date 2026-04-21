@@ -21,7 +21,7 @@ The Rust crate is organized around the runtime layers we want long term:
 - `strategy`: deep-ITM covered-call candidate evaluation only
 - `state`: portfolio summaries and deep-ITM buy-write order-intent guardrails
 - `paper_state`: persistent paper-order idempotency and hold-to-close lifecycle tracking
-- `execution`: guarded dry-run plus paper-only combo-BAG submission layer
+- `execution`: analysis-only plus guarded paper-only combo-BAG submission layer
 - `scanner`: end-to-end cycle orchestration and cycle-report generation
 - `scoring`: legacy/reference scoring math carried forward for parity work
 
@@ -82,7 +82,7 @@ The engine currently supports:
 10. Run `cargo test`
 11. Run `cargo run -p ibkr-options-engine`
 
-The current screening defaults mirror the Python reference more closely for deep-ITM calls, with an exact-expiry override available when needed: `TARGET_EXPIRY=20260424`, `MIN_EXPIRY_DAYS=30`, `MAX_EXPIRY_DAYS=60`, `MIN_ITM_DEPTH_PCT=0.05`, `MIN_DOWNSIDE_BUFFER_PCT=0.12`, `MIN_EXPIRATION_YIELD_PCT=1.0`, and `MIN_ANNUALIZED_YIELD_PCT=12`. When `TARGET_EXPIRY` is set, the scanner uses that exact expiration even if it falls outside the default day window. Ranking still increases with both annualized return and ITM depth, while scaling down higher-beta names.
+The current screening defaults mirror the Python reference more closely for deep-ITM calls, with explicit expiration-date selection available through `EXPIRATION_DATES=20260515` or a comma-separated list such as `EXPIRATION_DATES=20260515,20250620`. Ranking still increases with both annualized return and ITM depth, while scaling down higher-beta names.
 
 Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, `MARKET_DATA_MODE=live`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, refuses to route symbols that relied on delayed/frozen data, requires `BUYING_POWER` to be present on the IBKR paper account summary, refreshes open positions after broker activity, and only advances the short call after fill reconciliation confirms covered shares. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
 

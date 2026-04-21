@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_UNIVERSE_FILE: &str = "docs/50_stocks_list.csv";
+const DEFAULT_EXPIRATION_DATE: &str = "20260515";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -100,9 +101,7 @@ impl MarketDataMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrategyConfig {
     pub default_beta: f64,
-    pub target_expiry: Option<String>,
-    pub min_expiry_days: i64,
-    pub max_expiry_days: i64,
+    pub expiration_dates: Vec<String>,
     pub min_annualized_yield_pct: f64,
     pub min_expiration_yield_pct: f64,
     pub min_expiration_profit_per_share: f64,
@@ -117,9 +116,7 @@ impl Default for StrategyConfig {
     fn default() -> Self {
         Self {
             default_beta: 1.5,
-            target_expiry: None,
-            min_expiry_days: 30,
-            max_expiry_days: 60,
+            expiration_dates: vec![DEFAULT_EXPIRATION_DATE.to_string()],
             min_annualized_yield_pct: 12.0,
             min_expiration_yield_pct: 1.0,
             min_expiration_profit_per_share: 0.05,
@@ -216,7 +213,9 @@ impl AppConfig {
             .as_deref()
             .map(parse_symbols)
             .unwrap_or_default();
-        let target_expiry = normalize_expiry_env("TARGET_EXPIRY")?;
+        let defaults = StrategyConfig::default();
+        let expiration_dates = normalize_expiry_list_env("EXPIRATION_DATES")?
+            .unwrap_or_else(|| defaults.expiration_dates.clone());
         let mut startup_warnings = Vec::new();
 
         if raw_universe_file
@@ -252,7 +251,6 @@ impl AppConfig {
             );
         }
 
-        let defaults = StrategyConfig::default();
         let risk_defaults = RiskConfig::default();
 
         Ok(Self {
@@ -274,19 +272,7 @@ impl AppConfig {
                 default_beta: env_or_default("DEFAULT_BETA", &defaults.default_beta.to_string())?
                     .parse()
                     .context("DEFAULT_BETA must be numeric")?,
-                target_expiry,
-                min_expiry_days: env_or_default(
-                    "MIN_EXPIRY_DAYS",
-                    &defaults.min_expiry_days.to_string(),
-                )?
-                .parse()
-                .context("MIN_EXPIRY_DAYS must be numeric")?,
-                max_expiry_days: env_or_default(
-                    "MAX_EXPIRY_DAYS",
-                    &defaults.max_expiry_days.to_string(),
-                )?
-                .parse()
-                .context("MAX_EXPIRY_DAYS must be numeric")?,
+                expiration_dates,
                 min_annualized_yield_pct: env_or_default(
                     "MIN_ANNUALIZED_YIELD_PCT",
                     &defaults.min_annualized_yield_pct.to_string(),
@@ -446,7 +432,7 @@ fn normalize_optional_env(value: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn normalize_expiry_env(key: &str) -> Result<Option<String>> {
+fn normalize_expiry_list_env(key: &str) -> Result<Option<Vec<String>>> {
     let Some(value) = raw_optional_env(key) else {
         return Ok(None);
     };
@@ -455,11 +441,23 @@ fn normalize_expiry_env(key: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let parsed = NaiveDate::parse_from_str(trimmed, "%Y%m%d")
-        .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
-        .with_context(|| format!("{key} must use YYYYMMDD or YYYY-MM-DD"))?;
+    let expirations = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            NaiveDate::parse_from_str(value, "%Y%m%d")
+                .or_else(|_| NaiveDate::parse_from_str(value, "%Y-%m-%d"))
+                .with_context(|| format!("{key} must use YYYYMMDD or YYYY-MM-DD"))
+                .map(|parsed| parsed.format("%Y%m%d").to_string())
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    Ok(Some(parsed.format("%Y%m%d").to_string()))
+    if expirations.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(expirations))
 }
 
 pub fn parse_bool(value: &str) -> Result<bool> {
@@ -482,8 +480,8 @@ pub fn parse_symbols(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrokerPlatform, MarketDataMode, RunMode, RuntimeMode, normalize_expiry_env, parse_bool,
-        parse_symbols,
+        BrokerPlatform, MarketDataMode, RunMode, RuntimeMode, normalize_expiry_list_env,
+        parse_bool, parse_symbols,
     };
 
     #[test]
@@ -526,16 +524,19 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_target_expiry_values() {
+    fn normalizes_expiration_date_values() {
         unsafe {
-            std::env::set_var("TARGET_EXPIRY", "2026-04-24");
+            std::env::set_var("EXPIRATION_DATES", "2026-04-24, 20260515");
         }
 
-        let expiry = normalize_expiry_env("TARGET_EXPIRY").unwrap();
-        assert_eq!(expiry.as_deref(), Some("20260424"));
+        let expirations = normalize_expiry_list_env("EXPIRATION_DATES").unwrap();
+        assert_eq!(
+            expirations,
+            Some(vec!["20260424".to_string(), "20260515".to_string()])
+        );
 
         unsafe {
-            std::env::remove_var("TARGET_EXPIRY");
+            std::env::remove_var("EXPIRATION_DATES");
         }
     }
 }
