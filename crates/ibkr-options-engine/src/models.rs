@@ -223,6 +223,7 @@ pub struct BrokerOpenOrder {
     pub order_id: i32,
     pub client_id: i32,
     pub perm_id: i32,
+    pub order_ref: String,
     pub symbol: String,
     pub security_type: String,
     pub action: String,
@@ -230,6 +231,8 @@ pub struct BrokerOpenOrder {
     pub order_type: String,
     pub limit_price: Option<f64>,
     pub status: String,
+    pub filled_quantity: f64,
+    pub remaining_quantity: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

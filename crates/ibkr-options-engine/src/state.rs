@@ -8,8 +8,6 @@ use crate::{
     },
 };
 
-const COMBO_DEBIT_PRICE_OFFSET: f64 = 0.02;
-
 pub fn summarize_open_positions(positions: &[InventoryPosition]) -> Vec<OpenPositionState> {
     let mut by_symbol: BTreeMap<String, OpenPositionState> = BTreeMap::new();
 
@@ -99,14 +97,16 @@ pub fn build_order_intents(
             continue;
         };
 
-        let combo_limit_price =
-            round_to_cents(stock_ask - candidate.option_bid + COMBO_DEBIT_PRICE_OFFSET);
+        let combo_limit_price = floor_to_cents(combo_limit_price_from_profit_floor(
+            candidate,
+            &config.strategy,
+        ));
         if combo_limit_price <= 0.0 {
             rejections.push(GuardrailRejection {
                 symbol: candidate.symbol.clone(),
                 stage: "pricing".to_string(),
                 reason: format!(
-                    "combo debit {:.2} is non-positive after applying the $0.02 marketability offset",
+                    "combo debit {:.2} is non-positive after applying the configured profit-floor guardrails",
                     combo_limit_price
                 ),
             });
@@ -257,8 +257,30 @@ pub fn build_order_intents(
     (intents, rejections, open_positions)
 }
 
-fn round_to_cents(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
+fn floor_to_cents(value: f64) -> f64 {
+    (value * 100.0).floor() / 100.0
+}
+
+fn combo_limit_price_from_profit_floor(
+    candidate: &ScoredOptionCandidate,
+    strategy: &crate::config::StrategyConfig,
+) -> f64 {
+    let min_profit_cap = candidate.strike - strategy.min_expiration_profit_per_share;
+    let min_expiration_yield_cap = max_debit_for_yield_floor(
+        candidate.strike,
+        strategy.min_expiration_yield_pct / 100.0,
+    );
+    let annualized_floor = strategy.min_annualized_yield_pct / 100.0
+        * (candidate.days_to_expiration as f64 / 365.0);
+    let min_annualized_yield_cap = max_debit_for_yield_floor(candidate.strike, annualized_floor);
+
+    min_profit_cap
+        .min(min_expiration_yield_cap)
+        .min(min_annualized_yield_cap)
+}
+
+fn max_debit_for_yield_floor(strike: f64, required_yield: f64) -> f64 {
+    strike / (1.0 + required_yield.max(0.0))
 }
 
 #[cfg(test)]
@@ -486,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_combo_bag_intent_from_stock_ask_minus_call_bid_minus_two_cents() {
+    fn builds_combo_bag_intent_from_profit_floor_debit_cap() {
         let candidate = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
@@ -526,14 +548,59 @@ mod tests {
 
         assert!(rejections.is_empty());
         assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].combo_limit_price, Some(86.12));
-        assert_eq!(intents[0].estimated_net_debit, 8_612.0);
+        assert_eq!(intents[0].combo_limit_price, Some(89.10));
+        assert_eq!(intents[0].estimated_net_debit, 8_910.0);
+        assert!((intents[0].max_profit - 90.0).abs() < 0.001);
         assert_eq!(intents[0].legs[0].contract_id, Some(1001));
         assert_eq!(intents[0].legs[1].contract_id, Some(2001));
     }
 
     #[test]
-    fn rejects_combo_bag_when_adjusted_debit_breaks_profit_thresholds() {
+    fn uses_annualized_yield_floor_when_it_is_more_conservative() {
+        let candidate = ScoredOptionCandidate {
+            symbol: "AAPL".to_string(),
+            beta: 1.1,
+            underlying_contract_id: 1001,
+            underlying_price: 100.0,
+            underlying_ask: Some(100.10),
+            option_contract_id: 2001,
+            strike: 90.0,
+            expiry: "20261015".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: "AAPL".to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 180,
+            option_bid: 14.0,
+            option_ask: Some(14.1),
+            delta: Some(0.8),
+            itm_depth_pct: 0.1,
+            downside_buffer_pct: 0.14,
+            expiration_profit_per_share: 4.0,
+            annualized_yield_pct: 20.0,
+            expiration_yield_pct: 4.0,
+            score: 0.2,
+        };
+
+        let (intents, rejections, _summary) = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[candidate],
+            &test_config(),
+        );
+
+        assert!(rejections.is_empty());
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].combo_limit_price, Some(84.97));
+    }
+
+    #[test]
+    fn uses_absolute_profit_floor_when_it_is_more_conservative() {
         let candidate = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
@@ -577,11 +644,9 @@ mod tests {
             },
         );
 
-        assert!(intents.is_empty());
-        assert!(rejections.iter().any(|rejection| {
-            rejection.stage == "pricing"
-                && rejection.reason.contains("combo BAG debit")
-                && rejection.reason.contains("expiration profit")
-        }));
+        assert!(rejections.is_empty());
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].combo_limit_price, Some(98.50));
+        assert_eq!(intents[0].max_profit, 100.0);
     }
 }

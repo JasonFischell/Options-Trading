@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use ibapi::Error as IbkrError;
 use ibapi::accounts::types::AccountGroup;
@@ -6,7 +8,7 @@ use ibapi::market_data::MarketDataType;
 use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
 use ibapi::orders::Orders;
 use ibapi::prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 use tracing::info;
 
 use crate::{
@@ -196,32 +198,59 @@ pub async fn fetch_open_orders(client: &Client, account: &str) -> Result<Vec<Bro
         .await
         .context("failed to request IBKR open orders")?;
 
-    let mut orders = Vec::new();
+    let mut orders_by_id = BTreeMap::new();
+    let mut status_by_id = BTreeMap::new();
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive open order update")? {
             Orders::OrderData(order) => {
                 if order.order.account != account {
                     continue;
                 }
-                orders.push(BrokerOpenOrder {
+                let (status, filled_quantity, remaining_quantity) = status_by_id
+                    .remove(&order.order_id)
+                    .unwrap_or_else(|| {
+                        (
+                            order.order_state.status.clone(),
+                            0.0,
+                            order.order.total_quantity,
+                        )
+                    });
+                orders_by_id.insert(order.order_id, BrokerOpenOrder {
                     account: order.order.account.clone(),
                     order_id: order.order_id,
                     client_id: order.order.client_id,
                     perm_id: order.order.perm_id,
+                    order_ref: order.order.order_ref.clone(),
                     symbol: order.contract.symbol.to_string(),
                     security_type: order.contract.security_type.to_string(),
                     action: format!("{:?}", order.order.action),
                     total_quantity: order.order.total_quantity,
                     order_type: format!("{:?}", order.order.order_type),
                     limit_price: order.order.limit_price.filter(|price| *price > 0.0),
-                    status: order.order_state.status.clone(),
+                    status,
+                    filled_quantity,
+                    remaining_quantity,
                 });
             }
-            Orders::OrderStatus(_) | Orders::Notice(_) => {}
+            Orders::OrderStatus(status) => {
+                if let Some(order) = orders_by_id.get_mut(&status.order_id) {
+                    if !status.status.is_empty() {
+                        order.status = status.status.clone();
+                    }
+                    order.filled_quantity = status.filled;
+                    order.remaining_quantity = status.remaining;
+                } else {
+                    status_by_id.insert(
+                        status.order_id,
+                        (status.status.clone(), status.filled, status.remaining),
+                    );
+                }
+            }
+            Orders::Notice(_) => {}
         }
     }
 
-    Ok(orders)
+    Ok(orders_by_id.into_values().collect())
 }
 
 pub async fn fetch_completed_orders(
@@ -263,6 +292,29 @@ pub async fn fetch_completed_orders(
     }
 
     Ok(orders)
+}
+
+pub async fn cancel_open_order(client: &Client, order_id: i32) -> Result<()> {
+    let mut subscription = client
+        .cancel_order(order_id, "")
+        .await
+        .with_context(|| format!("failed to request cancellation for IBKR order {order_id}"))?;
+    let started = Instant::now();
+    let collection_window = Duration::from_secs(5);
+    let idle_timeout = Duration::from_secs(1);
+
+    while started.elapsed() < collection_window {
+        match timeout(idle_timeout, subscription.next()).await {
+            Ok(Some(event)) => {
+                event.with_context(|| {
+                    format!("failed while monitoring cancellation for IBKR order {order_id}")
+                })?;
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn resolve_primary_stock_contract_id(client: &Client, symbol: &str) -> Result<i32> {

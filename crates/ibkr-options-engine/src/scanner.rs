@@ -104,6 +104,41 @@ where
         );
     }
 
+    let mut open_orders = Vec::new();
+    if config.guarded_paper_submission_enabled() {
+        let mut completed_orders;
+        open_orders = provider.load_open_orders().await?;
+        completed_orders = provider.load_completed_orders().await?;
+        paper_trade_ledger.reconcile_with_broker_orders(
+            &open_orders,
+            &completed_orders,
+            &mut action_log,
+        );
+
+        let stale_open_orders = open_orders
+            .iter()
+            .filter(|order| should_cancel_unfilled_strategy_order(order))
+            .cloned()
+            .collect::<Vec<_>>();
+        for order in &stale_open_orders {
+            provider.cancel_order(order.order_id).await?;
+            action_log.push(format!(
+                "{}: requested cancellation for unfilled strategy BAG order {} before new paper submissions.",
+                order.symbol, order.order_id
+            ));
+        }
+
+        if !stale_open_orders.is_empty() {
+            open_orders = provider.load_open_orders().await?;
+            completed_orders = provider.load_completed_orders().await?;
+            paper_trade_ledger.reconcile_with_broker_orders(
+                &open_orders,
+                &completed_orders,
+                &mut action_log,
+            );
+        }
+    }
+
     for record in &universe {
         symbols_scanned += 1;
         let Some(snapshot) = provider.fetch_symbol_snapshot(record, config).await? else {
@@ -235,14 +270,6 @@ where
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
 
     if config.guarded_paper_submission_enabled() {
-        let open_orders = provider.load_open_orders().await?;
-        let completed_orders = provider.load_completed_orders().await?;
-        paper_trade_ledger.reconcile_with_broker_orders(
-            &open_orders,
-            &completed_orders,
-            &mut action_log,
-        );
-
         let blocked_symbols = proposed_orders
             .iter()
             .filter(|intent| non_live_symbols.contains(&intent.symbol))
@@ -370,6 +397,14 @@ where
     })
 }
 
+fn should_cancel_unfilled_strategy_order(order: &crate::models::BrokerOpenOrder) -> bool {
+    order.security_type.eq_ignore_ascii_case("BAG")
+        && order.action.eq_ignore_ascii_case("BUY")
+        && order.order_ref.starts_with("deepitm-buywrite:")
+        && order.remaining_quantity > 0.0
+        && order.filled_quantity <= f64::EPSILON
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, path::PathBuf, sync::Mutex};
@@ -394,8 +429,9 @@ mod tests {
     struct ReplayProvider {
         account: AccountState,
         positions: Vec<InventoryPosition>,
-        open_orders: Vec<BrokerOpenOrder>,
-        completed_orders: Vec<BrokerCompletedOrder>,
+        open_orders: Mutex<Vec<BrokerOpenOrder>>,
+        completed_orders: Mutex<Vec<BrokerCompletedOrder>>,
+        cancelled_order_ids: Mutex<Vec<i32>>,
         symbols: HashMap<String, SymbolMarketSnapshot>,
     }
 
@@ -410,11 +446,47 @@ mod tests {
         }
 
         async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>> {
-            Ok(self.open_orders.clone())
+            Ok(self.open_orders.lock().unwrap().clone())
         }
 
         async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>> {
-            Ok(self.completed_orders.clone())
+            Ok(self.completed_orders.lock().unwrap().clone())
+        }
+
+        async fn cancel_order(&self, order_id: i32) -> Result<()> {
+            self.cancelled_order_ids.lock().unwrap().push(order_id);
+            let cancelled = {
+                let mut open_orders = self.open_orders.lock().unwrap();
+                let cancelled = open_orders
+                    .iter()
+                    .find(|order| order.order_id == order_id)
+                    .cloned();
+                open_orders.retain(|order| order.order_id != order_id);
+                cancelled
+            };
+            if let Some(order) = cancelled {
+                self.completed_orders
+                    .lock()
+                    .unwrap()
+                    .push(BrokerCompletedOrder {
+                        account: order.account,
+                        order_id: order.order_id,
+                        client_id: order.client_id,
+                        perm_id: order.perm_id,
+                        symbol: order.symbol,
+                        security_type: order.security_type,
+                        action: order.action,
+                        total_quantity: order.total_quantity,
+                        order_type: order.order_type,
+                        limit_price: order.limit_price,
+                        status: "Cancelled".to_string(),
+                        completed_status: "Cancelled".to_string(),
+                        reject_reason: String::new(),
+                        warning_text: "cancelled by replay provider".to_string(),
+                        completed_time: "20260420 00:00:00 America/Denver".to_string(),
+                    });
+            }
+            Ok(())
         }
 
         async fn fetch_symbol_snapshot(
@@ -567,8 +639,9 @@ mod tests {
                     net_liquidation: Some(30_000.0),
                 },
                 positions: Vec::new(),
-                open_orders: Vec::new(),
-                completed_orders: Vec::new(),
+                open_orders: Mutex::new(Vec::new()),
+                completed_orders: Mutex::new(Vec::new()),
+                cancelled_order_ids: Mutex::new(Vec::new()),
                 symbols,
             },
             &RecordingExecutor::default(),
@@ -648,8 +721,9 @@ mod tests {
                     net_liquidation: Some(30_000.0),
                 },
                 positions: Vec::new(),
-                open_orders: Vec::new(),
-                completed_orders: Vec::new(),
+                open_orders: Mutex::new(Vec::new()),
+                completed_orders: Mutex::new(Vec::new()),
+                cancelled_order_ids: Mutex::new(Vec::new()),
                 symbols,
             },
             &executor,
@@ -755,44 +829,39 @@ mod tests {
         );
 
         let executor = RecordingExecutor::default();
-        let report = run_scan_cycle(
-            &ReplayProvider {
-                account: AccountState {
-                    account: "DU123".to_string(),
-                    available_funds: Some(20_000.0),
-                    buying_power: Some(20_000.0),
-                    net_liquidation: Some(30_000.0),
-                },
-                positions: Vec::new(),
-                open_orders: vec![BrokerOpenOrder {
-                    account: "DU123".to_string(),
-                    order_id: 10,
-                    client_id: 100,
-                    perm_id: 99,
-                    symbol: "AAPL".to_string(),
-                    security_type: "BAG".to_string(),
-                    action: "BUY".to_string(),
-                    total_quantity: 1.0,
-                    order_type: "LMT".to_string(),
-                    limit_price: Some(86.08),
-                    status: "PreSubmitted".to_string(),
-                }],
-                completed_orders: Vec::new(),
-                symbols,
+        let provider = ReplayProvider {
+            account: AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(20_000.0),
+                buying_power: Some(20_000.0),
+                net_liquidation: Some(30_000.0),
             },
-            &executor,
-            &config,
-        )
-        .await
-        .unwrap();
+            positions: Vec::new(),
+            open_orders: Mutex::new(vec![BrokerOpenOrder {
+                account: "DU123".to_string(),
+                order_id: 10,
+                client_id: 100,
+                perm_id: 99,
+                order_ref: "deepitm-buywrite:AAPL:combo:buywrite".to_string(),
+                symbol: "AAPL".to_string(),
+                security_type: "BAG".to_string(),
+                action: "BUY".to_string(),
+                total_quantity: 1.0,
+                order_type: "LMT".to_string(),
+                limit_price: Some(86.08),
+                status: "PreSubmitted".to_string(),
+                filled_quantity: 0.0,
+                remaining_quantity: 1.0,
+            }]),
+            completed_orders: Mutex::new(Vec::new()),
+            cancelled_order_ids: Mutex::new(Vec::new()),
+            symbols,
+        };
+        let report = run_scan_cycle(&provider, &executor, &config).await.unwrap();
 
-        assert!(report.proposed_orders.is_empty());
-        assert!(
-            report.guardrail_rejections.iter().any(|rejection| {
-                rejection.symbol == "AAPL" && rejection.stage == "idempotency"
-            })
-        );
-        assert_eq!(executor.recorded.lock().unwrap().len(), 0);
+        assert_eq!(report.proposed_orders.len(), 1);
+        assert_eq!(executor.recorded.lock().unwrap().as_slice(), ["AAPL"]);
+        assert_eq!(provider.cancelled_order_ids.lock().unwrap().as_slice(), [10]);
 
         std::fs::remove_file(ledger_path).unwrap();
     }

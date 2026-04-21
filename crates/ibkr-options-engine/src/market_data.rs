@@ -11,7 +11,8 @@ use tracing::{info, warn};
 use crate::{
     config::{AppConfig, MarketDataMode},
     ibkr::{
-        IbkrClientDescriptor, SelectedOptionContract, connect, fetch_account_state,
+        IbkrClientDescriptor, SelectedOptionContract, cancel_open_order, connect,
+        fetch_account_state,
         fetch_completed_orders, fetch_open_orders, fetch_positions,
         is_invalid_option_contract_error, log_server_time, market_data_mode_label,
         request_option_chain_for_underlying, request_option_quote,
@@ -36,6 +37,7 @@ pub trait MarketDataProvider {
     async fn load_inventory(&self) -> Result<Vec<InventoryPosition>>;
     async fn load_open_orders(&self) -> Result<Vec<BrokerOpenOrder>>;
     async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>>;
+    async fn cancel_order(&self, order_id: i32) -> Result<()>;
     async fn fetch_symbol_snapshot(
         &self,
         record: &UniverseRecord,
@@ -81,6 +83,10 @@ impl MarketDataProvider for IbkrMarketDataProvider {
 
     async fn load_completed_orders(&self) -> Result<Vec<BrokerCompletedOrder>> {
         fetch_completed_orders(&self.client, &self.account).await
+    }
+
+    async fn cancel_order(&self, order_id: i32) -> Result<()> {
+        cancel_open_order(&self.client, order_id).await
     }
 
     async fn fetch_symbol_snapshot(
