@@ -382,10 +382,11 @@ fn push_universe_record(
         return;
     };
 
-    if let Some(price) = parse_optional_f64(price) {
-        if price < config.risk.min_underlying_price || price > config.risk.max_underlying_price {
-            return;
-        }
+    if let Some(price) = parse_optional_f64(price)
+        && (price < config.risk.min_underlying_price
+            || price > config.risk.max_underlying_price)
+    {
+        return;
     }
 
     if !seen.insert(symbol.clone()) {
@@ -402,7 +403,7 @@ fn push_universe_record(
 fn find_header_index(headers: &StringRecord, candidates: &[&str]) -> Option<usize> {
     headers
         .iter()
-        .position(|header| candidates.iter().any(|candidate| header == *candidate))
+        .position(|header| candidates.contains(&header))
 }
 
 fn extract_symbol(

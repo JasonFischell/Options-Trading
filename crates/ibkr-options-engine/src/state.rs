@@ -997,7 +997,6 @@ mod tests {
                     capital_source: CapitalSource::BuyingPower,
                     max_cash_per_symbol_pct: 100.0,
                     min_cash_reserve_pct: 5.0,
-                    ..AllocationConfig::default()
                 },
                 ..test_config()
             },

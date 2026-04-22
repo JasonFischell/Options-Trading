@@ -537,7 +537,7 @@ impl ConfigOverrides {
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let parsed: FileConfig = toml::from_str(&raw)
             .with_context(|| format!("failed to parse TOML config file {}", path.display()))?;
-        Ok(parsed.into_overrides()?)
+        parsed.into_overrides()
     }
 
     fn apply(&mut self, higher: Self) {

@@ -69,10 +69,10 @@ impl OrderExecutor for AnalysisOnlyExecutor {
 
 #[derive(Debug, Clone)]
 enum BrokerOrderEvent {
-    OpenOrder(OrderData),
-    OrderStatus(OrderStatus),
-    ExecutionData(ExecutionData),
-    CommissionReport(CommissionReport),
+    OpenOrder(Box<OrderData>),
+    OrderStatus(Box<OrderStatus>),
+    ExecutionData(Box<ExecutionData>),
+    CommissionReport(Box<CommissionReport>),
     Message { code: i32, message: String },
 }
 
@@ -215,10 +215,14 @@ impl BrokerOrderGateway for IbkrOrderGateway {
             let event = match result
                 .with_context(|| format!("failed while monitoring IBKR order {order_id}"))?
             {
-                PlaceOrder::OpenOrder(order) => BrokerOrderEvent::OpenOrder(order),
-                PlaceOrder::OrderStatus(status) => BrokerOrderEvent::OrderStatus(status),
-                PlaceOrder::ExecutionData(data) => BrokerOrderEvent::ExecutionData(data),
-                PlaceOrder::CommissionReport(report) => BrokerOrderEvent::CommissionReport(report),
+                PlaceOrder::OpenOrder(order) => BrokerOrderEvent::OpenOrder(Box::new(order)),
+                PlaceOrder::OrderStatus(status) => BrokerOrderEvent::OrderStatus(Box::new(status)),
+                PlaceOrder::ExecutionData(data) => {
+                    BrokerOrderEvent::ExecutionData(Box::new(data))
+                }
+                PlaceOrder::CommissionReport(report) => {
+                    BrokerOrderEvent::CommissionReport(Box::new(report))
+                }
                 PlaceOrder::Message(notice) => BrokerOrderEvent::Message {
                     code: notice.code,
                     message: notice.message,
@@ -620,7 +624,7 @@ fn broker_event_timeline(outcome: &SubmittedOrderOutcome) -> Vec<BrokerEventTime
         .events
         .iter()
         .map(|event| BrokerEventTimelineEntry {
-            observed_at: event.observed_at.clone(),
+            observed_at: event.observed_at,
             elapsed_ms: event.elapsed_ms,
             event_type: broker_event_type_label(&event.event).to_string(),
             detail: broker_event_detail(&event.event),
@@ -691,7 +695,7 @@ fn persist_broker_event_log(
     let timeline = events
         .iter()
         .map(|event| BrokerEventTimelineEntry {
-            observed_at: event.observed_at.clone(),
+            observed_at: event.observed_at,
             elapsed_ms: event.elapsed_ms,
             event_type: broker_event_type_label(&event.event).to_string(),
             detail: broker_event_detail(&event.event),
@@ -1373,13 +1377,13 @@ mod tests {
     async fn submits_combo_bag_once_and_tracks_both_legs_together() {
         let gateway = MockGateway::new(
             vec![10],
-            vec![vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+            vec![vec![BrokerOrderEvent::OrderStatus(Box::new(OrderStatus {
                 order_id: 10,
                 status: "Submitted".to_string(),
                 filled: 0.0,
                 remaining: 1.0,
                 ..OrderStatus::default()
-            })]],
+            }))]],
         );
         let executor = GuardedPaperOrderExecutorInner::new(gateway, Duration::from_millis(1));
         let records = executor
@@ -1408,27 +1412,27 @@ mod tests {
         let gateway = MockGateway::new(
             vec![10, 11, 12],
             vec![
-                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                vec![BrokerOrderEvent::OrderStatus(Box::new(OrderStatus {
                     order_id: 10,
                     status: "Submitted".to_string(),
                     filled: 0.0,
                     remaining: 1.0,
                     ..OrderStatus::default()
-                })],
-                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                }))],
+                vec![BrokerOrderEvent::OrderStatus(Box::new(OrderStatus {
                     order_id: 11,
                     status: "Submitted".to_string(),
                     filled: 0.0,
                     remaining: 1.0,
                     ..OrderStatus::default()
-                })],
-                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                }))],
+                vec![BrokerOrderEvent::OrderStatus(Box::new(OrderStatus {
                     order_id: 12,
                     status: "Submitted".to_string(),
                     filled: 0.0,
                     remaining: 1.0,
                     ..OrderStatus::default()
-                })],
+                }))],
             ],
         );
         let mut config = paper_config();
@@ -1481,7 +1485,7 @@ mod tests {
                     TimedBrokerOrderEvent {
                         observed_at: Utc::now(),
                         elapsed_ms: 0,
-                        event: BrokerOrderEvent::ExecutionData(ExecutionData {
+                        event: BrokerOrderEvent::ExecutionData(Box::new(ExecutionData {
                             contract: Contract {
                                 contract_id: intent.legs[0].contract_id.unwrap(),
                                 ..Contract::default()
@@ -1495,16 +1499,16 @@ mod tests {
                                 ..Execution::default()
                             },
                             ..ExecutionData::default()
-                        }),
+                        })),
                     },
                     TimedBrokerOrderEvent {
                         observed_at: Utc::now(),
                         elapsed_ms: 1,
-                        event: BrokerOrderEvent::CommissionReport(CommissionReport {
+                        event: BrokerOrderEvent::CommissionReport(Box::new(CommissionReport {
                             execution_id: "stock-fill".to_string(),
                             commission: 1.25,
                             ..CommissionReport::default()
-                        }),
+                        })),
                     },
                 ],
                 broker_event_log_path: None,
@@ -1519,7 +1523,7 @@ mod tests {
                     TimedBrokerOrderEvent {
                         observed_at: Utc::now(),
                         elapsed_ms: 0,
-                        event: BrokerOrderEvent::ExecutionData(ExecutionData {
+                        event: BrokerOrderEvent::ExecutionData(Box::new(ExecutionData {
                             contract: Contract {
                                 contract_id: intent.legs[1].contract_id.unwrap(),
                                 ..Contract::default()
@@ -1533,16 +1537,16 @@ mod tests {
                                 ..Execution::default()
                             },
                             ..ExecutionData::default()
-                        }),
+                        })),
                     },
                     TimedBrokerOrderEvent {
                         observed_at: Utc::now(),
                         elapsed_ms: 1,
-                        event: BrokerOrderEvent::CommissionReport(CommissionReport {
+                        event: BrokerOrderEvent::CommissionReport(Box::new(CommissionReport {
                             execution_id: "option-fill".to_string(),
                             commission: 0.65,
                             ..CommissionReport::default()
-                        }),
+                        })),
                     },
                 ],
                 broker_event_log_path: None,

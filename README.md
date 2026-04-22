@@ -70,21 +70,27 @@ The engine currently supports:
 
 ## Running The Current Scanner
 
-1. Copy `.env.example` to `.env`
-2. Keep `IBKR_PLATFORM=gateway` unless you intentionally want TWS
-3. For paper Gateway, use `IBKR_PORT=4002` unless your Gateway settings show a different API port
-4. Leave `UNIVERSE_FILE=docs/50_stocks_list.csv` unless you intentionally want a different CSV universe
-5. Keep `MIN_UNDERLYING_PRICE=1` and `MAX_UNDERLYING_PRICE=20` for the current sub-$20 watchlist
-6. Keep `IBKR_READ_ONLY=true` and `ENABLE_PAPER_ORDERS=false` for early testing
-7. Set `IBKR_CONNECT_ON_START=true` only when IB Gateway or TWS paper is running
-8. In IB Gateway, enable `Configure > Settings > API > Settings > Enable ActiveX and Socket Clients`
-9. If localhost is restricted, add `127.0.0.1` to trusted IPs
-10. Run `cargo test`
-11. Run `cargo run -p ibkr-options-engine`
+The preferred workflow is TOML-backed CLI runs:
+
+1. Copy `ibkr-options-engine.example.toml` to a local file such as `paper-trading.local.toml`
+2. Edit `paper-trading.local.toml` with your IBKR account, expirations, watchlist, budget, and execution flags
+3. Keep `platform = "gateway"` unless you intentionally want TWS
+4. For paper Gateway, use `port = 4002` unless your Gateway settings show a different API port
+5. Keep `tickers_file = "docs/50_stocks_list.csv"` unless you intentionally want a different CSV universe
+6. Keep `min_underlying_price = 1.0` and `max_underlying_price = 20.0` for the current sub-$20 watchlist
+7. Keep `read_only = true` and `enable_paper_orders = false` for early testing
+8. Set `connect_on_start = true` only when IB Gateway or TWS paper is already running
+9. In IB Gateway, enable `Configure > Settings > API > Settings > Enable ActiveX and Socket Clients`
+10. If localhost is restricted, add `127.0.0.1` to trusted IPs
+11. Run `cargo test -p ibkr-options-engine`
+12. Run `cargo run -p ibkr-options-engine -- scan --config paper-trading.local.toml`
+13. Run `cargo run -p ibkr-options-engine -- status --config paper-trading.local.toml`
+
+Environment variables still work, and `.env.example` remains as a compatibility template, but the CLI `--config` flow is now the clearest path for repeatable paper runs.
 
 The current screening defaults mirror the Python reference more closely for deep-ITM calls, with explicit expiration-date selection available through `EXPIRATION_DATES=20260515` or a comma-separated list such as `EXPIRATION_DATES=20260515,20250620`. Ranking still increases with both annualized return and ITM depth, while scaling down higher-beta names.
 
-Paper submission is now guarded behind `IBKR_READ_ONLY=false`, `ENABLE_PAPER_ORDERS=true`, `IBKR_RUNTIME_MODE=paper`, `MARKET_DATA_MODE=live`, and `ENABLE_LIVE_ORDERS=false`. The flow submits the stock leg first, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, refuses to route symbols that relied on delayed/frozen data, requires `BUYING_POWER` to be present on the IBKR paper account summary, refreshes open positions after broker activity, and only advances the short call after fill reconciliation confirms covered shares. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
+Paper submission is now guarded behind `read_only = false`, `enable_paper_orders = true`, `runtime_mode = "paper"`, `market_data_mode = "live"`, and `enable_live_orders = false`. Routed paper sizing now requires `AVAILABLE_FUNDS` from the IBKR account summary, while `capital_source = "buying_power"` remains analysis-only for allocation previews and logs. The guarded paper flow routes one combo BAG order, refuses to route symbols that relied on delayed/frozen data, persists a durable per-symbol/per-intent paper ledger to block duplicate submissions across restarts, and can auto-reprice the combo debit through a small capped ladder (`auto_reprice`, `reprice_attempts`, `reprice_wait_seconds`) without breaching the configured profit floor. No automated exit strategy is implemented in this slice, so tracked paper positions remain hold-to-close only until IBKR reports them closed.
 
 For thin delayed/frozen option markets, the scanner now retries one model-price snapshot before rejecting a contract as missing premium and includes IBKR notices plus the fields that were actually returned. This is especially useful for off-hours troubleshooting on `NVTS`, `PTON`, and `BB`, where delayed/frozen data often returns greeks or underlying marks without a usable bid/last/close on the option itself.
 

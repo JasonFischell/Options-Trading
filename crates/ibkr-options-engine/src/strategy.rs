@@ -43,21 +43,21 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    if let Some(spread_pct) = option.spread_pct() {
-        if spread_pct > config.max_option_spread_pct {
-            return Err(GuardrailRejection {
-                symbol: record.symbol.clone(),
-                stage: "strategy".to_string(),
-                reason: format!(
-                    "option spread {:.2}% exceeds maximum {:.2}%",
-                    spread_pct * 100.0,
-                    config.max_option_spread_pct * 100.0
-                ),
-            });
-        }
+    if let Some(spread_pct) = option.spread_pct()
+        && spread_pct > config.max_option_spread_pct
+    {
+        return Err(GuardrailRejection {
+            symbol: record.symbol.clone(),
+            stage: "strategy".to_string(),
+            reason: format!(
+                "option spread {:.2}% exceeds maximum {:.2}%",
+                spread_pct * 100.0,
+                config.max_option_spread_pct * 100.0
+            ),
+        });
     }
 
-    if option.right.trim().to_ascii_uppercase() != "C" {
+    if !option.right.trim().eq_ignore_ascii_case("C") {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),

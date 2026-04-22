@@ -382,7 +382,6 @@ pub async fn request_option_chain_for_underlying(
         let next_stream_item = match next_item {
             Ok(item) => item,
             Err(_) => {
-                if chain_count == 0 {}
                 break;
             }
         };

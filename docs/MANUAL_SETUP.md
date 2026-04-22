@@ -31,28 +31,35 @@ In IB Gateway:
 6. Allow localhost connections or add `127.0.0.1` to trusted IPs if you use the trusted-IP setting
 7. Keep read-only mode enabled during early testing unless you intentionally begin guarded paper-order submission
 
-## 4. Move Secrets Out Of Source Code
+## 4. Move Secrets And Runtime Settings Out Of Source Code
 
 Before we add broker connectivity:
 
-1. Create a local `.env` file that is not committed
-2. Copy values from `.env.example`
+1. Create a local TOML config such as `paper-trading.local.toml`
+2. Copy values from `ibkr-options-engine.example.toml`
 3. Fill in IBKR host, port, client ID, and account identifiers
+4. Use `.env` only for compatibility or temporary overrides
 
-Suggested variables:
+Suggested settings to review in the TOML file:
 
-- `IBKR_HOST`
-- `IBKR_PLATFORM`
-- `IBKR_PORT`
-- `IBKR_CLIENT_ID`
-- `IBKR_ACCOUNT`
-- `IBKR_RUNTIME_MODE`
-- `IBKR_READ_ONLY`
-- `UNIVERSE_FILE`
-- `EXPIRATION_DATES`
-- `IBKR_CONNECT_ON_START`
-- `MIN_UNDERLYING_PRICE`
-- `MAX_UNDERLYING_PRICE`
+- `[broker].host`
+- `[broker].platform`
+- `[broker].port`
+- `[broker].client_id`
+- `[broker].account`
+- `[broker].runtime_mode`
+- `[broker].read_only`
+- `[broker].connect_on_start`
+- `[universe].tickers_file`
+- `[strategy].expiration_dates`
+- `[allocation].deployment_budget`
+- `[allocation].capital_source`
+- `[allocation].max_cash_per_symbol_pct`
+- `[allocation].min_cash_reserve_pct`
+- `[execution].enable_paper_orders`
+- `[execution].auto_reprice`
+- `[execution].reprice_attempts`
+- `[execution].reprice_wait_seconds`
 
 ## 5. Validate The Current Python Baseline
 
@@ -78,21 +85,24 @@ My recommendation is Rust unless there is a strong team preference for the .NET 
 From the repository root:
 
 1. Open a new terminal after the Rust install so `cargo` and `rg` are on `PATH`
-2. Copy `.env.example` to `.env`
+2. Copy `ibkr-options-engine.example.toml` to `paper-trading.local.toml`
 3. Start IB Gateway in paper mode
 4. Run `cargo build`
-5. Run `cargo run -p ibkr-options-engine`
-6. Set `IBKR_CONNECT_ON_START=true` only when you want the app to test a real broker connection at startup
-7. Leave `ENABLE_LIVE_ORDERS=false`; guarded buy-write submission is paper-only and routes as a combo BAG
+5. Run `cargo run -p ibkr-options-engine -- scan --config paper-trading.local.toml`
+6. Run `cargo run -p ibkr-options-engine -- status --config paper-trading.local.toml`
+7. Set `connect_on_start = true` only when you want the app to test a real broker connection at startup
+8. Leave `enable_live_orders = false`; guarded buy-write submission is paper-only and routes as a combo BAG
 
 Recommended starting values:
 
-- `IBKR_PLATFORM=gateway`
-- `IBKR_PORT=4002`
-- `IBKR_RUNTIME_MODE=paper`
-- `IBKR_READ_ONLY=true`
-- `UNIVERSE_FILE=docs/50_stocks_list.csv`
-- `EXPIRATION_DATES=20260515`
-- `MIN_EXPIRATION_YIELD_PCT=1.0`
-- `MIN_UNDERLYING_PRICE=1`
-- `MAX_UNDERLYING_PRICE=20`
+- `platform = "gateway"`
+- `port = 4002`
+- `runtime_mode = "paper"`
+- `read_only = true`
+- `tickers_file = "docs/50_stocks_list.csv"`
+- `expiration_dates = ["20260515"]`
+- `deployment_budget = 10000.0`
+- `capital_source = "available_funds"`
+- `auto_reprice = true`
+- `reprice_attempts = 3`
+- `reprice_wait_seconds = 2`
