@@ -482,6 +482,9 @@ fn render_execution_records(records: &[ExecutionRecord]) -> Vec<String> {
         if let Some(path) = &record.broker_event_log_path {
             lines.push(format!("  broker artifact: {path}"));
         }
+        for timing in &record.execution_step_timings {
+            lines.push(render_execution_step_timing(timing));
+        }
     }
 
     lines
@@ -531,6 +534,23 @@ fn render_execution_leg(leg: &ExecutionLegRecord) -> String {
             leg.execution_ids.join(",")
         },
         leg.note
+    )
+}
+
+fn render_execution_step_timing(timing: &crate::models::ExecutionStepTiming) -> String {
+    format!(
+        "  timing: {} | duration={}ms | attempt={} | order_id={} | limit {}",
+        timing.step,
+        timing.duration_ms,
+        timing
+            .attempt
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        timing
+            .order_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        format_optional_price(timing.limit_price)
     )
 }
 
@@ -904,6 +924,7 @@ mod tests {
                 }),
                 broker_event_log_path: Some("logs/example.json".to_string()),
                 broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
             }],
             open_positions: vec![OpenPositionState {
                 symbol: "AAPL".to_string(),

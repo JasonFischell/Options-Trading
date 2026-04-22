@@ -611,6 +611,7 @@ mod tests {
                     fill_reconciliation: None,
                     broker_event_log_path: None,
                     broker_event_timeline: Vec::new(),
+                    execution_step_timings: Vec::new(),
                 })
                 .collect())
         }

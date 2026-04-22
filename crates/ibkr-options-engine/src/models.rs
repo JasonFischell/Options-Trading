@@ -341,6 +341,15 @@ pub struct BrokerEventTimelineEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionStepTiming {
+    pub step: String,
+    pub duration_ms: i64,
+    pub attempt: Option<usize>,
+    pub order_id: Option<i32>,
+    pub limit_price: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
     pub symbol: String,
     pub status: String,
@@ -350,6 +359,7 @@ pub struct ExecutionRecord {
     pub fill_reconciliation: Option<FillReconciliationRecord>,
     pub broker_event_log_path: Option<String>,
     pub broker_event_timeline: Vec<BrokerEventTimelineEntry>,
+    pub execution_step_timings: Vec<ExecutionStepTiming>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

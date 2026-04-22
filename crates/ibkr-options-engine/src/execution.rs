@@ -18,8 +18,8 @@ use crate::{
     artifacts::logs_dir,
     config::{AppConfig, RuntimeMode},
     models::{
-        BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord,
-        InstrumentType, OrderIntent, OrderLegIntent, TradeAction,
+        BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, ExecutionStepTiming,
+        FillReconciliationRecord, InstrumentType, OrderIntent, OrderLegIntent, TradeAction,
     },
 };
 
@@ -59,6 +59,7 @@ impl OrderExecutor for AnalysisOnlyExecutor {
                 fill_reconciliation: None,
                 broker_event_log_path: None,
                 broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
             });
         }
 
@@ -123,6 +124,7 @@ impl LegFillSummary {
 #[async_trait(?Send)]
 trait BrokerOrderGateway {
     fn next_order_id(&self) -> i32;
+    async fn cancel_order(&self, order_id: i32) -> Result<()>;
 
     async fn place_order_and_collect(
         &self,
@@ -148,6 +150,30 @@ impl IbkrOrderGateway {
 impl BrokerOrderGateway for IbkrOrderGateway {
     fn next_order_id(&self) -> i32 {
         self.client.next_order_id()
+    }
+
+    async fn cancel_order(&self, order_id: i32) -> Result<()> {
+        let mut subscription = self
+            .client
+            .cancel_order(order_id, "")
+            .await
+            .with_context(|| format!("failed to request cancellation for IBKR order {order_id}"))?;
+        let started = Instant::now();
+        let collection_window = Duration::from_secs(5);
+        let idle_timeout = Duration::from_secs(1);
+
+        while started.elapsed() < collection_window {
+            match timeout(idle_timeout, subscription.next()).await {
+                Ok(Some(event)) => {
+                    event.with_context(|| {
+                        format!("failed while monitoring cancellation for IBKR order {order_id}")
+                    })?;
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        Ok(())
     }
 
     async fn place_order_and_collect(
@@ -295,7 +321,7 @@ where
                 continue;
             }
 
-            records.push(self.submit_guarded_buy_write(intent).await?);
+            records.push(self.submit_guarded_buy_write(intent, config).await?);
         }
 
         if intents.is_empty() {
@@ -308,6 +334,7 @@ where
                 fill_reconciliation: None,
                 broker_event_log_path: None,
                 broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
             });
         }
 
@@ -319,7 +346,11 @@ impl<G> GuardedPaperOrderExecutorInner<G>
 where
     G: BrokerOrderGateway,
 {
-    async fn submit_guarded_buy_write(&self, intent: &OrderIntent) -> Result<ExecutionRecord> {
+    async fn submit_guarded_buy_write(
+        &self,
+        intent: &OrderIntent,
+        config: &AppConfig,
+    ) -> Result<ExecutionRecord> {
         let stock_leg = intent
             .legs
             .iter()
@@ -345,8 +376,8 @@ where
                 )
             })?;
 
-        let combo_submission = self
-            .submit_combo_buy_write(intent, stock_leg, option_leg)
+        let (combo_submission, execution_step_timings) = self
+            .submit_combo_buy_write(intent, stock_leg, option_leg, config)
             .await?;
         let stock_summary = summarize_leg_outcome(stock_leg, Some(&combo_submission));
         let stock_record = execution_leg_record(stock_leg, Some(&combo_submission), &stock_summary);
@@ -366,6 +397,7 @@ where
             fill_reconciliation: Some(fill_reconciliation),
             broker_event_log_path: combo_submission.broker_event_log_path.clone(),
             broker_event_timeline: broker_event_timeline(&combo_submission),
+            execution_step_timings,
         })
     }
 
@@ -374,29 +406,144 @@ where
         intent: &OrderIntent,
         stock_leg: &OrderLegIntent,
         option_leg: &OrderLegIntent,
-    ) -> Result<SubmittedOrderOutcome> {
-        let contract = build_ibkr_combo_contract(intent, stock_leg, option_leg)?;
-        let order = build_ibkr_combo_order(intent, stock_leg, option_leg)?;
-        let order_id = self.gateway.next_order_id();
-        let events = self
-            .gateway
-            .place_order_and_collect(
-                order_id,
-                &contract,
-                &order,
-                self.minimum_collection_window,
-                self.idle_timeout,
-            )
-            .await?;
-        let broker_event_log_path =
-            persist_broker_event_log(&intent.symbol, &intent.account, order_id, &events)?;
+        config: &AppConfig,
+    ) -> Result<(SubmittedOrderOutcome, Vec<ExecutionStepTiming>)> {
+        let mut step_timings = Vec::new();
 
-        Ok(SubmittedOrderOutcome {
-            order_id,
-            is_combo: true,
-            events,
-            broker_event_log_path: Some(broker_event_log_path.display().to_string()),
-        })
+        let contract_started = Instant::now();
+        let contract = build_ibkr_combo_contract(intent, stock_leg, option_leg)?;
+        push_step_timing(
+            &mut step_timings,
+            "build-combo-contract",
+            contract_started,
+            None,
+            None,
+            None,
+        );
+
+        let pricing_started = Instant::now();
+        let max_limit_price = intent
+            .combo_limit_price
+            .with_context(|| format!("missing combo limit price for {}", intent.symbol))?;
+        let initial_limit_price =
+            derive_initial_combo_limit_price(intent, stock_leg, option_leg, max_limit_price);
+        push_step_timing(
+            &mut step_timings,
+            "derive-combo-debit-pricing",
+            pricing_started,
+            None,
+            None,
+            Some(initial_limit_price),
+        );
+
+        let max_reprices = if config.execution.auto_reprice {
+            config.execution.reprice_attempts
+        } else {
+            0
+        };
+        let reprice_wait = Duration::from_secs(config.execution.reprice_wait_seconds.max(1));
+        let mut all_events = Vec::new();
+        let mut final_order_id = None;
+        let mut current_limit_price = initial_limit_price;
+
+        for attempt in 0..=max_reprices {
+            let order_started = Instant::now();
+            let order = build_ibkr_combo_order_at_limit(
+                intent,
+                stock_leg,
+                option_leg,
+                current_limit_price,
+            )?;
+            push_step_timing(
+                &mut step_timings,
+                "build-combo-order",
+                order_started,
+                Some(attempt),
+                None,
+                Some(current_limit_price),
+            );
+
+            let order_id = self.gateway.next_order_id();
+            final_order_id = Some(order_id);
+            let collection_window = if attempt < max_reprices {
+                self.minimum_collection_window.min(reprice_wait)
+            } else {
+                self.minimum_collection_window
+            };
+
+            let submit_started = Instant::now();
+            let attempt_events = self
+                .gateway
+                .place_order_and_collect(
+                    order_id,
+                    &contract,
+                    &order,
+                    collection_window,
+                    self.idle_timeout,
+                )
+                .await?;
+            push_step_timing(
+                &mut step_timings,
+                "place-and-collect-combo-order",
+                submit_started,
+                Some(attempt),
+                Some(order_id),
+                Some(current_limit_price),
+            );
+            all_events.extend(attempt_events);
+
+            if !should_auto_reprice_combo_order(&all_events, current_limit_price, max_limit_price)
+                || attempt >= max_reprices
+            {
+                break;
+            }
+
+            let next_limit_price = next_reprice_limit_price(
+                initial_limit_price,
+                max_limit_price,
+                attempt + 1,
+                max_reprices,
+            );
+            if next_limit_price <= current_limit_price {
+                break;
+            }
+
+            let cancel_started = Instant::now();
+            self.gateway.cancel_order(order_id).await?;
+            push_step_timing(
+                &mut step_timings,
+                "cancel-before-reprice",
+                cancel_started,
+                Some(attempt),
+                Some(order_id),
+                Some(current_limit_price),
+            );
+            current_limit_price = next_limit_price;
+        }
+
+        let order_id = final_order_id
+            .with_context(|| format!("no IBKR order id was allocated for {}", intent.symbol))?;
+        let persist_started = Instant::now();
+        let broker_event_log_path =
+            persist_broker_event_log(&intent.symbol, &intent.account, order_id, &all_events)?;
+        push_step_timing(
+            &mut step_timings,
+            "persist-broker-event-log",
+            persist_started,
+            None,
+            Some(order_id),
+            Some(current_limit_price),
+        );
+
+        Ok((
+            SubmittedOrderOutcome {
+                order_id,
+                is_combo: true,
+                events: all_events,
+                broker_event_log_path: Some(broker_event_log_path.display().to_string()),
+            },
+            step_timings,
+        ))
     }
 }
 
@@ -447,7 +594,25 @@ fn analysis_only_record(
         fill_reconciliation: None,
         broker_event_log_path: None,
         broker_event_timeline: Vec::new(),
+        execution_step_timings: Vec::new(),
     }
+}
+
+fn push_step_timing(
+    timings: &mut Vec<ExecutionStepTiming>,
+    step: &str,
+    started: Instant,
+    attempt: Option<usize>,
+    order_id: Option<i32>,
+    limit_price: Option<f64>,
+) {
+    timings.push(ExecutionStepTiming {
+        step: step.to_string(),
+        duration_ms: started.elapsed().as_millis() as i64,
+        attempt,
+        order_id,
+        limit_price,
+    });
 }
 
 fn broker_event_timeline(outcome: &SubmittedOrderOutcome) -> Vec<BrokerEventTimelineEntry> {
@@ -658,10 +823,23 @@ fn build_ibkr_combo_contract(
     })
 }
 
+#[cfg(test)]
 fn build_ibkr_combo_order(
     intent: &OrderIntent,
     stock_leg: &OrderLegIntent,
     option_leg: &OrderLegIntent,
+) -> Result<Order> {
+    let limit_price = intent
+        .combo_limit_price
+        .with_context(|| format!("missing combo limit price for {}", intent.symbol))?;
+    build_ibkr_combo_order_at_limit(intent, stock_leg, option_leg, limit_price)
+}
+
+fn build_ibkr_combo_order_at_limit(
+    intent: &OrderIntent,
+    stock_leg: &OrderLegIntent,
+    option_leg: &OrderLegIntent,
+    limit_price: f64,
 ) -> Result<Order> {
     if stock_leg.quantity != option_leg.quantity * 100 {
         anyhow::bail!(
@@ -670,9 +848,6 @@ fn build_ibkr_combo_order(
         );
     }
 
-    let limit_price = intent
-        .combo_limit_price
-        .with_context(|| format!("missing combo limit price for {}", intent.symbol))?;
     let mut order = order_builder::combo_limit_order(
         Action::Buy,
         option_leg.quantity as f64,
@@ -691,6 +866,80 @@ fn build_ibkr_combo_order(
         value: "0".to_string(),
     }];
     Ok(order)
+}
+
+fn derive_initial_combo_limit_price(
+    intent: &OrderIntent,
+    stock_leg: &OrderLegIntent,
+    option_leg: &OrderLegIntent,
+    max_limit_price: f64,
+) -> f64 {
+    let derived_debit = stock_leg
+        .limit_price
+        .zip(option_leg.limit_price)
+        .map(|(stock_price, option_price)| stock_price - option_price)
+        .filter(|value| value.is_finite() && *value > 0.0);
+
+    match derived_debit {
+        Some(value) => round_to_cents(value).min(max_limit_price),
+        None => intent.combo_limit_price.unwrap_or(max_limit_price),
+    }
+}
+
+fn next_reprice_limit_price(
+    initial_limit_price: f64,
+    max_limit_price: f64,
+    attempt_number: usize,
+    max_reprices: usize,
+) -> f64 {
+    if max_reprices == 0 || max_limit_price <= initial_limit_price {
+        return initial_limit_price;
+    }
+
+    let progress = attempt_number as f64 / max_reprices as f64;
+    ceil_to_cents(initial_limit_price + ((max_limit_price - initial_limit_price) * progress))
+        .min(max_limit_price)
+}
+
+fn should_auto_reprice_combo_order(
+    events: &[TimedBrokerOrderEvent],
+    current_limit_price: f64,
+    max_limit_price: f64,
+) -> bool {
+    if current_limit_price >= max_limit_price {
+        return false;
+    }
+
+    if broker_events_indicate_terminal_outcome(events) || broker_events_show_any_fill(events) {
+        return false;
+    }
+
+    latest_broker_status(events)
+        .map(|status| {
+            matches!(
+                status.trim().to_ascii_lowercase().as_str(),
+                "submitted" | "presubmitted" | "pendingsubmit" | "pending submit"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn broker_events_show_any_fill(events: &[TimedBrokerOrderEvent]) -> bool {
+    events.iter().any(|event| match &event.event {
+        BrokerOrderEvent::ExecutionData(data) => {
+            data.execution.shares > 0.0 || data.execution.cumulative_quantity > 0.0
+        }
+        BrokerOrderEvent::OrderStatus(status) => status.filled > 0.0,
+        _ => false,
+    })
+}
+
+fn round_to_cents(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn ceil_to_cents(value: f64) -> f64 {
+    (value * 100.0).ceil() / 100.0
 }
 
 fn summarize_leg_outcome(
@@ -913,7 +1162,8 @@ mod tests {
     use super::{
         BrokerOrderEvent, BrokerOrderGateway, GuardedPaperOrderExecutorInner, OrderExecutor,
         SubmittedOrderOutcome, TimedBrokerOrderEvent, build_ibkr_combo_contract,
-        build_ibkr_combo_order, reconcile_buy_write_fill, summarize_leg_outcome,
+        build_ibkr_combo_order, derive_initial_combo_limit_price, reconcile_buy_write_fill,
+        summarize_leg_outcome,
     };
     use crate::{
         config::{
@@ -934,6 +1184,7 @@ mod tests {
     struct MockGateway {
         next_order_ids: RefCell<VecDeque<i32>>,
         submissions: RefCell<Vec<(i32, Contract, Order)>>,
+        cancellations: RefCell<Vec<i32>>,
         events: RefCell<VecDeque<Vec<BrokerOrderEvent>>>,
     }
 
@@ -942,6 +1193,7 @@ mod tests {
             Self {
                 next_order_ids: RefCell::new(next_order_ids.into()),
                 submissions: RefCell::new(Vec::new()),
+                cancellations: RefCell::new(Vec::new()),
                 events: RefCell::new(events.into()),
             }
         }
@@ -954,6 +1206,11 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .expect("missing test order id")
+        }
+
+        async fn cancel_order(&self, order_id: i32) -> Result<()> {
+            self.cancellations.borrow_mut().push(order_id);
+            Ok(())
         }
 
         async fn place_order_and_collect(
@@ -1118,6 +1375,73 @@ mod tests {
                 .as_ref()
                 .is_some_and(|fill| !fill.eligible_for_short_call)
         );
+        assert!(!records[0].execution_step_timings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn starts_at_derived_combo_debit_and_reprices_toward_cap() {
+        let gateway = MockGateway::new(
+            vec![10, 11, 12],
+            vec![
+                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                    order_id: 10,
+                    status: "Submitted".to_string(),
+                    filled: 0.0,
+                    remaining: 1.0,
+                    ..OrderStatus::default()
+                })],
+                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                    order_id: 11,
+                    status: "Submitted".to_string(),
+                    filled: 0.0,
+                    remaining: 1.0,
+                    ..OrderStatus::default()
+                })],
+                vec![BrokerOrderEvent::OrderStatus(OrderStatus {
+                    order_id: 12,
+                    status: "Submitted".to_string(),
+                    filled: 0.0,
+                    remaining: 1.0,
+                    ..OrderStatus::default()
+                })],
+            ],
+        );
+        let mut config = paper_config();
+        config.execution.reprice_attempts = 2;
+        config.execution.reprice_wait_seconds = 1;
+
+        let mut intent = buy_write_intent();
+        intent.combo_limit_price = Some(86.3);
+
+        let executor = GuardedPaperOrderExecutorInner::new(gateway, Duration::from_millis(1));
+        let records = executor.execute(&[intent], &config).await.unwrap();
+        let gateway = &executor.gateway;
+        let submissions = gateway.submissions.borrow();
+        let cancellations = gateway.cancellations.borrow();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(submissions.len(), 3);
+        assert_eq!(submissions[0].2.limit_price, Some(86.0));
+        assert_eq!(submissions[1].2.limit_price, Some(86.15));
+        assert_eq!(submissions[2].2.limit_price, Some(86.3));
+        assert_eq!(cancellations.as_slice(), &[10, 11]);
+        assert!(
+            records[0]
+                .execution_step_timings
+                .iter()
+                .any(|timing| timing.step == "cancel-before-reprice")
+        );
+    }
+
+    #[test]
+    fn derives_initial_combo_debit_from_leg_prices_and_respects_cap() {
+        let mut intent = buy_write_intent();
+        intent.combo_limit_price = Some(85.95);
+
+        let derived =
+            derive_initial_combo_limit_price(&intent, &intent.legs[0], &intent.legs[1], 85.95);
+
+        assert_eq!(derived, 85.95);
     }
 
     #[test]
