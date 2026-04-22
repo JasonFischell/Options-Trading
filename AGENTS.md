@@ -32,6 +32,14 @@ This repository is a Rust-first IBKR options automation project. Codex should op
 - Summarize what changed, what was verified, and what the next best milestone is.
 - Keep docs updates focused on architecture, workflow, or setup changes that materially affect future sessions.
 
+## Windows Temp Directories
+
+- Anticipate routine Windows file-lock issues for builds, tests, and other generated artifacts.
+- Create per-run temp directories outside the repository under `%LOCALAPPDATA%\Temp`, using a project-specific prefix such as `options-trading-*` or `target-codex-*`, instead of placing temp outputs inside the worktree when lock contention is likely.
+- Reuse those external temp directories for `CARGO_TARGET_DIR` and other scratch paths when that reduces lock conflicts.
+- Remove temp directories when they are no longer needed, but never delete paths that were not created for the current task.
+- Treat creation and cleanup of these temp directories as expected repository workflow, so Codex should do it proactively rather than pausing to ask the user for confirmation each time.
+
 ## Commit Guidance
 
 - After each major milestone, stage the intended files and create a commit.
