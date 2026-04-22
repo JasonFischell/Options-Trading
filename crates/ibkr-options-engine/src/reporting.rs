@@ -100,6 +100,14 @@ pub fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             report.account_state.net_liquidation
         ),
         format!(
+            "Capital allocation: configured source {} | preview {} deployable {:.2} | routed {} deployable {:.2}",
+            report.capital_source_details.configured_source,
+            report.capital_source_details.preview.source,
+            report.capital_source_details.preview.deployable_cash,
+            report.capital_source_details.routed_orders.source,
+            report.capital_source_details.routed_orders.deployable_cash
+        ),
+        format!(
             "Universe: {} scanned, {} underlying snapshots, {} option quotes",
             report.symbols_scanned, report.underlying_snapshots, report.option_quotes_considered
         ),
@@ -168,6 +176,8 @@ pub fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
             ),
         ],
     );
+
+    append_section(&mut lines, "Allocation", render_allocation_summary(report));
 
     if !report.warnings.is_empty() {
         append_section(
@@ -430,9 +440,10 @@ fn render_proposed_orders(proposed_orders: &[OrderIntent]) -> Vec<String> {
     let mut lines = Vec::new();
     for intent in proposed_orders {
         lines.push(format!(
-            "- {} | {} | est debit {:.2} | est credit {:.2} | max profit {:.2} | combo limit {} | mode {}",
+            "- {} | {} | lots {} | est debit {:.2} | est credit {:.2} | max profit {:.2} | combo limit {} | mode {}",
             intent.symbol,
             intent.strategy,
+            intent.lot_quantity,
             intent.estimated_net_debit,
             intent.estimated_credit,
             intent.max_profit,
@@ -460,6 +471,44 @@ fn render_proposed_orders(proposed_orders: &[OrderIntent]) -> Vec<String> {
     }
 
     lines
+}
+
+fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
+    let preview = &report.capital_source_details.preview;
+    let routed = &report.capital_source_details.routed_orders;
+
+    vec![
+        format!(
+            "- Configured source={} | preview source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployment budget {:.2} | deployable {:.2} | per-symbol cap {:.2}",
+            report.capital_source_details.configured_source,
+            preview.source,
+            preview.reported_amount,
+            preview.reserve_pct,
+            preview.reserve_amount,
+            preview.cash_after_reserve,
+            preview.deployment_budget,
+            preview.deployable_cash,
+            preview.max_cash_per_symbol
+        ),
+        format!(
+            "- Routed orders source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployable {:.2} | per-symbol cap {:.2}",
+            routed.source,
+            routed.reported_amount,
+            routed.reserve_pct,
+            routed.reserve_amount,
+            routed.cash_after_reserve,
+            routed.deployable_cash,
+            routed.max_cash_per_symbol
+        ),
+        format!(
+            "- Collapsed candidate symbols {} | selected symbols {} | total lots {} | allocated cash {:.2} | remaining cash {:.2}",
+            report.allocation_summary.candidate_symbols_considered,
+            report.allocation_summary.selected_symbols,
+            report.allocation_summary.total_lots,
+            report.allocation_summary.allocated_cash,
+            report.allocation_summary.remaining_cash
+        ),
+    ]
 }
 
 fn render_execution_records(records: &[ExecutionRecord]) -> Vec<String> {
@@ -769,11 +818,11 @@ mod tests {
             PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{
-            AccountState, BrokerCompletedOrder, BrokerOpenOrder, CycleReport,
-            CycleThroughputCounters, CycleTimingMetrics, ExecutionLegRecord, ExecutionRecord,
-            FillReconciliationRecord, GuardrailRejection, InstrumentType, OpenPositionState,
-            OrderIntent, OrderLegIntent, PaperTradeLifecycleRecord, ScoredOptionCandidate,
-            StatusReport, TradeAction,
+            AccountState, AllocationSummary, BrokerCompletedOrder, BrokerOpenOrder,
+            CapitalAllocationView, CapitalSourceDetails, CycleReport, CycleThroughputCounters,
+            CycleTimingMetrics, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord,
+            GuardrailRejection, InstrumentType, OpenPositionState, OrderIntent, OrderLegIntent,
+            PaperTradeLifecycleRecord, ScoredOptionCandidate, StatusReport, TradeAction,
         },
     };
 
@@ -854,6 +903,7 @@ mod tests {
                 strategy: "deep-ITM covered-call buy-write".to_string(),
                 account: "DU1234567".to_string(),
                 mode: "paper-combo-bag".to_string(),
+                lot_quantity: 1,
                 combo_limit_price: Some(89.25),
                 estimated_net_debit: 8_925.0,
                 estimated_credit: 1_100.0,
@@ -951,6 +1001,36 @@ mod tests {
             }],
             live_data_requested: true,
             non_live_symbols: Vec::new(),
+            capital_source_details: CapitalSourceDetails {
+                configured_source: "available_funds".to_string(),
+                preview: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_pct: 5.0,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 1_900.0,
+                },
+                routed_orders: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_pct: 5.0,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 1_900.0,
+                },
+            },
+            allocation_summary: AllocationSummary {
+                candidate_symbols_considered: 1,
+                selected_symbols: 1,
+                total_lots: 1,
+                allocated_cash: 8_925.0,
+                remaining_cash: 575.0,
+            },
             warnings: vec!["example warning".to_string()],
             action_log: vec!["example action".to_string()],
             timing_metrics: CycleTimingMetrics {
@@ -978,6 +1058,8 @@ mod tests {
         assert!(log.contains("Execution Outcomes:"));
         assert!(log.contains("System State At Close:"));
         assert!(log.contains("Guardrail Rejections:"));
+        assert!(log.contains("Allocation:"));
+        assert!(log.contains("Collapsed candidate symbols 1 | selected symbols 1 | total lots 1"));
         assert!(log.contains("Outcome scoreboard:"));
         assert!(log.contains("Cycle timing: total 1500 ms, market data 900 ms"));
         assert!(log.contains("Throughput: symbol concurrency 4 | option quote concurrency 2"));

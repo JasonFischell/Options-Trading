@@ -443,16 +443,17 @@ fn intent_key(intent: &OrderIntent) -> String {
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "na".to_string());
             format!(
-                "{:?}:{:?}:{}:{}:{}:{}",
-                leg.instrument_type, leg.action, leg.symbol, expiry, strike, limit
+                "{:?}:{:?}:{}:{}:{}:{}:{}",
+                leg.instrument_type, leg.action, leg.symbol, leg.quantity, expiry, strike, limit
             )
         })
         .collect::<Vec<_>>();
     leg_parts.sort();
     format!(
-        "{}|{}|{}",
+        "{}|{}|lots:{}|{}",
         intent.symbol,
         intent.strategy,
+        intent.lot_quantity,
         leg_parts.join("|")
     )
 }
@@ -481,6 +482,7 @@ mod tests {
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: "DU123".to_string(),
             mode: "paper-combo-bag".to_string(),
+            lot_quantity: 1,
             combo_limit_price: Some(9.0),
             estimated_net_debit: 1.0,
             estimated_credit: 1.0,

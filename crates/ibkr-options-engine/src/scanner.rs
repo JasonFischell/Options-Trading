@@ -7,7 +7,10 @@ use crate::{
     config::AppConfig,
     execution::OrderExecutor,
     market_data::{MarketDataProvider, load_universe},
-    models::{CycleReport, CycleThroughputCounters, CycleTimingMetrics, GuardrailRejection},
+    models::{
+        AllocationSummary, CapitalSourceDetails, CycleReport, CycleThroughputCounters,
+        CycleTimingMetrics, GuardrailRejection,
+    },
     paper_state::PaperTradeLedger,
     state::build_order_intents,
     strategy::evaluate_buy_write_candidate,
@@ -99,9 +102,9 @@ where
             crate::ibkr::market_data_mode_label(config.market_data_mode)
         ));
     }
-    if config.guarded_paper_submission_enabled() && account.buying_power.is_none() {
+    if config.guarded_paper_submission_enabled() && account.available_funds.is_none() {
         warnings.push(
-            "IBKR account summary did not return BUYING_POWER for the configured paper account; guarded paper routing will stay blocked."
+            "IBKR account summary did not return AVAILABLE_FUNDS for the configured paper account; guarded paper routing will stay blocked."
                 .to_string(),
         );
     }
@@ -292,10 +295,43 @@ where
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let (mut proposed_orders, risk_rejections, mut open_positions) =
-        build_order_intents(&account, &positions, &candidates, config);
-    guardrail_rejections.extend(risk_rejections);
+    let intent_build = build_order_intents(&account, &positions, &candidates, config);
+    let CapitalSourceDetails {
+        configured_source,
+        preview,
+        routed_orders,
+    } = intent_build.capital_source_details;
+    let AllocationSummary {
+        candidate_symbols_considered,
+        selected_symbols,
+        total_lots,
+        allocated_cash,
+        remaining_cash,
+    } = intent_build.allocation_summary;
+    let mut proposed_orders = intent_build.intents;
+    let mut open_positions = intent_build.open_positions;
+    guardrail_rejections.extend(intent_build.rejections);
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
+    action_log.push(format!(
+        "Capital allocation: configured_source={} | preview {}={:?} deployable {:.2} | routed {}={:?} deployable {:.2} | per-symbol cap {:.2} | selected {} symbol(s) / {} lot(s) across {} collapsed candidate symbol(s) | allocated {:.2} | remaining {:.2}.",
+        configured_source,
+        preview.source,
+        preview.reported_amount,
+        preview.deployable_cash,
+        routed_orders.source,
+        routed_orders.reported_amount,
+        routed_orders.deployable_cash,
+        if config.guarded_paper_submission_enabled() {
+            routed_orders.max_cash_per_symbol
+        } else {
+            preview.max_cash_per_symbol
+        },
+        selected_symbols,
+        total_lots,
+        candidate_symbols_considered,
+        allocated_cash,
+        remaining_cash
+    ));
 
     if config.guarded_paper_submission_enabled() {
         let blocked_symbols = proposed_orders
@@ -369,8 +405,12 @@ where
     let paper_trade_lifecycle = paper_trade_ledger.snapshot();
     for intent in &proposed_orders {
         action_log.push(format!(
-            "{}: proposed {} with estimated net debit {:.2} and max profit {:.2}.",
-            intent.symbol, intent.strategy, intent.estimated_net_debit, intent.max_profit
+            "{}: proposed {} for {} lot(s) with estimated net debit {:.2} and max profit {:.2}.",
+            intent.symbol,
+            intent.strategy,
+            intent.lot_quantity,
+            intent.estimated_net_debit,
+            intent.max_profit
         ));
     }
     for execution in &execution_records {
@@ -423,6 +463,18 @@ where
         paper_trade_lifecycle,
         live_data_requested: config.prefers_live_market_data(),
         non_live_symbols: non_live_symbols.into_iter().collect(),
+        capital_source_details: CapitalSourceDetails {
+            configured_source,
+            preview,
+            routed_orders,
+        },
+        allocation_summary: AllocationSummary {
+            candidate_symbols_considered,
+            selected_symbols,
+            total_lots,
+            allocated_cash,
+            remaining_cash,
+        },
         warnings,
         action_log,
         timing_metrics,
@@ -645,7 +697,11 @@ mod tests {
                 max_underlying_price: 250.0,
                 ..RiskConfig::default()
             },
-            allocation: AllocationConfig::default(),
+            allocation: AllocationConfig {
+                max_cash_per_symbol_pct: 100.0,
+                min_cash_reserve_pct: 0.0,
+                ..AllocationConfig::default()
+            },
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
         }

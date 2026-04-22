@@ -290,11 +290,40 @@ pub struct OrderIntent {
     pub strategy: String,
     pub account: String,
     pub mode: String,
+    pub lot_quantity: i32,
     pub combo_limit_price: Option<f64>,
     pub estimated_net_debit: f64,
     pub estimated_credit: f64,
     pub max_profit: f64,
     pub legs: Vec<OrderLegIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapitalAllocationView {
+    pub source: String,
+    pub reported_amount: Option<f64>,
+    pub reserve_pct: f64,
+    pub reserve_amount: f64,
+    pub cash_after_reserve: f64,
+    pub deployment_budget: f64,
+    pub deployable_cash: f64,
+    pub max_cash_per_symbol: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapitalSourceDetails {
+    pub configured_source: String,
+    pub preview: CapitalAllocationView,
+    pub routed_orders: CapitalAllocationView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AllocationSummary {
+    pub candidate_symbols_considered: usize,
+    pub selected_symbols: usize,
+    pub total_lots: i32,
+    pub allocated_cash: f64,
+    pub remaining_cash: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -420,6 +449,8 @@ pub struct CycleReport {
     pub paper_trade_lifecycle: Vec<PaperTradeLifecycleRecord>,
     pub live_data_requested: bool,
     pub non_live_symbols: Vec<String>,
+    pub capital_source_details: CapitalSourceDetails,
+    pub allocation_summary: AllocationSummary,
     pub warnings: Vec<String>,
     pub action_log: Vec<String>,
     pub timing_metrics: CycleTimingMetrics,

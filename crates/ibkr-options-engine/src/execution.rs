@@ -841,7 +841,12 @@ fn build_ibkr_combo_order_at_limit(
     option_leg: &OrderLegIntent,
     limit_price: f64,
 ) -> Result<Order> {
-    if stock_leg.quantity != option_leg.quantity * 100 {
+    if intent.lot_quantity < 1 {
+        anyhow::bail!("combo lot quantity must be positive for {}", intent.symbol);
+    }
+
+    if option_leg.quantity != intent.lot_quantity || stock_leg.quantity != intent.lot_quantity * 100
+    {
         anyhow::bail!(
             "combo ratio mismatch for {}: expected 100 stock shares per short call contract",
             intent.symbol
@@ -850,7 +855,7 @@ fn build_ibkr_combo_order_at_limit(
 
     let mut order = order_builder::combo_limit_order(
         Action::Buy,
-        option_leg.quantity as f64,
+        intent.lot_quantity as f64,
         limit_price,
         false,
     );
@@ -1273,6 +1278,7 @@ mod tests {
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: "DU1234567".to_string(),
             mode: "paper-combo-bag".to_string(),
+            lot_quantity: 1,
             combo_limit_price: Some(86.0),
             estimated_net_debit: 8_600.0,
             estimated_credit: 1_400.0,
@@ -1342,6 +1348,25 @@ mod tests {
             "NonGuaranteed"
         );
         assert_eq!(combo_order.smart_combo_routing_params[0].value, "0");
+    }
+
+    #[test]
+    fn multi_lot_combo_order_uses_single_combo_quantity() {
+        let mut intent = buy_write_intent();
+        intent.lot_quantity = 3;
+        intent.estimated_net_debit = 25_800.0;
+        intent.estimated_credit = 4_200.0;
+        intent.max_profit = 1_200.0;
+        intent.legs[0].quantity = 300;
+        intent.legs[0].description = "Buy 300 shares of AAPL".to_string();
+        intent.legs[1].quantity = 3;
+        intent.legs[1].description =
+            "Sell 3 deep-ITM covered call contract(s) AAPL 20260515 90".to_string();
+
+        let combo_order =
+            build_ibkr_combo_order(&intent, &intent.legs[0], &intent.legs[1]).unwrap();
+
+        assert_eq!(combo_order.total_quantity, 3.0);
     }
 
     #[tokio::test]
