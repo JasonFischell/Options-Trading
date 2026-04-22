@@ -217,9 +217,7 @@ impl BrokerOrderGateway for IbkrOrderGateway {
             {
                 PlaceOrder::OpenOrder(order) => BrokerOrderEvent::OpenOrder(Box::new(order)),
                 PlaceOrder::OrderStatus(status) => BrokerOrderEvent::OrderStatus(Box::new(status)),
-                PlaceOrder::ExecutionData(data) => {
-                    BrokerOrderEvent::ExecutionData(Box::new(data))
-                }
+                PlaceOrder::ExecutionData(data) => BrokerOrderEvent::ExecutionData(Box::new(data)),
                 PlaceOrder::CommissionReport(report) => {
                     BrokerOrderEvent::CommissionReport(Box::new(report))
                 }

@@ -9,7 +9,7 @@ use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
 use ibapi::orders::Orders;
 use ibapi::prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol};
 use tokio::time::{Duration, Instant, timeout};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     config::{AppConfig, MarketDataMode},
@@ -128,12 +128,14 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         net_liquidation: None,
     };
     let mut fallback_available_funds = None;
+    let mut diagnostics = AccountMetricDiagnostics::default();
 
     populate_account_state_from_summary(
         client,
         account,
         &mut state,
         &mut fallback_available_funds,
+        &mut diagnostics,
     )
     .await?;
 
@@ -143,12 +145,36 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
             account,
             &mut state,
             &mut fallback_available_funds,
+            &mut diagnostics,
         )
         .await?;
     }
 
     if state.available_funds.is_none() {
         state.available_funds = fallback_available_funds;
+    }
+
+    info!(
+        configured_account = %account,
+        summary_rows_seen = diagnostics.summary_rows_seen,
+        summary_rows_matched = diagnostics.summary_rows_matched,
+        update_rows_seen = diagnostics.update_rows_seen,
+        update_rows_matched = diagnostics.update_rows_matched,
+        available_funds = ?state.available_funds,
+        buying_power = ?state.buying_power,
+        net_liquidation = ?state.net_liquidation,
+        "resolved IBKR account metrics"
+    );
+    if !has_any_account_metric(&state) {
+        warn!(
+            configured_account = %account,
+            summary_rows_seen = diagnostics.summary_rows_seen,
+            summary_rows_matched = diagnostics.summary_rows_matched,
+            update_rows_seen = diagnostics.update_rows_seen,
+            update_rows_matched = diagnostics.update_rows_matched,
+            samples = %diagnostics.render_samples(),
+            "IBKR returned no usable account metrics; inspect raw account metric samples"
+        );
     }
 
     Ok(state)
@@ -159,6 +185,7 @@ async fn populate_account_state_from_summary(
     account: &str,
     state: &mut AccountState,
     fallback_available_funds: &mut Option<f64>,
+    diagnostics: &mut AccountMetricDiagnostics,
 ) -> Result<()> {
     let tags = &[
         AccountSummaryTags::NET_LIQUIDATION,
@@ -176,9 +203,16 @@ async fn populate_account_state_from_summary(
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive IBKR account summary update")? {
             AccountSummaryResult::Summary(summary) => {
-                if !account_summary_matches(account, &summary.account) {
+                diagnostics.summary_rows_seen += 1;
+                let matched = account_summary_matches(account, &summary.account);
+                diagnostics.push_sample(format!(
+                    "summary account={} tag={} value={} currency={} matched={}",
+                    summary.account, summary.tag, summary.value, summary.currency, matched
+                ));
+                if !matched {
                     continue;
                 }
+                diagnostics.summary_rows_matched += 1;
 
                 apply_account_metric(
                     state,
@@ -199,6 +233,7 @@ async fn populate_account_state_from_updates(
     account: &str,
     state: &mut AccountState,
     fallback_available_funds: &mut Option<f64>,
+    diagnostics: &mut AccountMetricDiagnostics,
 ) -> Result<()> {
     let mut subscription = client
         .account_updates(&AccountId::from(account))
@@ -208,11 +243,28 @@ async fn populate_account_state_from_updates(
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive IBKR account update")? {
             AccountUpdate::AccountValue(value) => {
-                if let Some(update_account) = value.account.as_deref() {
-                    if !account_summary_matches(account, update_account) {
-                        continue;
-                    }
+                diagnostics.update_rows_seen += 1;
+                let update_account = value.account.as_deref().unwrap_or("");
+                let matched =
+                    update_account.is_empty() || account_summary_matches(account, update_account);
+                diagnostics.push_sample(format!(
+                    "update account={} key={} value={} currency={} matched={}",
+                    if update_account.is_empty() {
+                        "<none>"
+                    } else {
+                        update_account
+                    },
+                    value.key,
+                    value.value,
+                    value.currency,
+                    matched
+                ));
+                if let Some(update_account) = value.account.as_deref()
+                    && !account_summary_matches(account, update_account)
+                {
+                    continue;
                 }
+                diagnostics.update_rows_matched += 1;
 
                 apply_account_metric(
                     state,
@@ -271,6 +323,33 @@ fn has_any_account_metric(state: &AccountState) -> bool {
         || state.net_liquidation.is_some()
 }
 
+#[derive(Debug, Default)]
+struct AccountMetricDiagnostics {
+    summary_rows_seen: usize,
+    summary_rows_matched: usize,
+    update_rows_seen: usize,
+    update_rows_matched: usize,
+    samples: Vec<String>,
+}
+
+impl AccountMetricDiagnostics {
+    const MAX_SAMPLES: usize = 12;
+
+    fn push_sample(&mut self, sample: String) {
+        if self.samples.len() < Self::MAX_SAMPLES {
+            self.samples.push(sample);
+        }
+    }
+
+    fn render_samples(&self) -> String {
+        if self.samples.is_empty() {
+            "none".to_string()
+        } else {
+            self.samples.join(" | ")
+        }
+    }
+}
+
 fn account_summary_matches(configured_account: &str, summary_account: &str) -> bool {
     let configured = normalized_account_id(configured_account);
     let summary = normalized_account_id(summary_account);
@@ -279,9 +358,7 @@ fn account_summary_matches(configured_account: &str, summary_account: &str) -> b
         return configured == summary;
     }
 
-    configured == summary
-        || configured.ends_with(&summary)
-        || summary.ends_with(&configured)
+    configured == summary || configured.ends_with(&summary) || summary.ends_with(&configured)
 }
 
 fn normalized_account_id(value: &str) -> String {
@@ -338,31 +415,33 @@ pub async fn fetch_open_orders(client: &Client, account: &str) -> Result<Vec<Bro
                 if order.order.account != account {
                     continue;
                 }
-                let (status, filled_quantity, remaining_quantity) = status_by_id
-                    .remove(&order.order_id)
-                    .unwrap_or_else(|| {
+                let (status, filled_quantity, remaining_quantity) =
+                    status_by_id.remove(&order.order_id).unwrap_or_else(|| {
                         (
                             order.order_state.status.clone(),
                             0.0,
                             order.order.total_quantity,
                         )
                     });
-                orders_by_id.insert(order.order_id, BrokerOpenOrder {
-                    account: order.order.account.clone(),
-                    order_id: order.order_id,
-                    client_id: order.order.client_id,
-                    perm_id: order.order.perm_id,
-                    order_ref: order.order.order_ref.clone(),
-                    symbol: order.contract.symbol.to_string(),
-                    security_type: order.contract.security_type.to_string(),
-                    action: format!("{:?}", order.order.action),
-                    total_quantity: order.order.total_quantity,
-                    order_type: format!("{:?}", order.order.order_type),
-                    limit_price: order.order.limit_price.filter(|price| *price > 0.0),
-                    status,
-                    filled_quantity,
-                    remaining_quantity,
-                });
+                orders_by_id.insert(
+                    order.order_id,
+                    BrokerOpenOrder {
+                        account: order.order.account.clone(),
+                        order_id: order.order_id,
+                        client_id: order.order.client_id,
+                        perm_id: order.order.perm_id,
+                        order_ref: order.order.order_ref.clone(),
+                        symbol: order.contract.symbol.to_string(),
+                        security_type: order.contract.security_type.to_string(),
+                        action: format!("{:?}", order.order.action),
+                        total_quantity: order.order.total_quantity,
+                        order_type: format!("{:?}", order.order.order_type),
+                        limit_price: order.order.limit_price.filter(|price| *price > 0.0),
+                        status,
+                        filled_quantity,
+                        remaining_quantity,
+                    },
+                );
             }
             Orders::OrderStatus(status) => {
                 if let Some(order) = orders_by_id.get_mut(&status.order_id) {
@@ -697,7 +776,11 @@ pub fn select_buy_write_contracts(
             };
             let days_to_expiration = (expiry_date - chrono::Utc::now().date_naive()).num_days();
             if days_to_expiration <= 0
-                || !config.strategy.expiration_dates.iter().any(|configured| configured == expiration)
+                || !config
+                    .strategy
+                    .expiration_dates
+                    .iter()
+                    .any(|configured| configured == expiration)
             {
                 continue;
             }
@@ -1426,7 +1509,11 @@ mod tests {
         let selected = select_buy_write_contracts("OPEN", &chains, 5.9, &config).unwrap();
 
         assert_eq!(selected.len(), 2);
-        assert!(selected.iter().all(|contract| contract.expiration == far_expiry));
+        assert!(
+            selected
+                .iter()
+                .all(|contract| contract.expiration == far_expiry)
+        );
     }
 
     #[test]

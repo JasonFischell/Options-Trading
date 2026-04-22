@@ -383,8 +383,7 @@ fn push_universe_record(
     };
 
     if let Some(price) = parse_optional_f64(price)
-        && (price < config.risk.min_underlying_price
-            || price > config.risk.max_underlying_price)
+        && (price < config.risk.min_underlying_price || price > config.risk.max_underlying_price)
     {
         return;
     }

@@ -1316,6 +1316,10 @@ enable_paper_orders = true
     #[test]
     fn requires_universe_source_and_expiration_dates() {
         clear_env();
+        let original_dir = std::env::current_dir().unwrap();
+        let test_dir = temp_test_dir("requires-config");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::env::set_current_dir(&test_dir).unwrap();
         unsafe {
             std::env::set_var("IBKR_ACCOUNT", "DU1234567");
         }
@@ -1323,6 +1327,8 @@ enable_paper_orders = true
         let error = AppConfig::from_env().unwrap_err().to_string();
         assert!(error.contains("ticker file or at least one ticker"));
 
+        std::env::set_current_dir(&original_dir).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
         clear_env();
     }
 

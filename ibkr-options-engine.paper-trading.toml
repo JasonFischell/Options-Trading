@@ -1,0 +1,52 @@
+[broker]
+host = "127.0.0.1"
+platform = "gateway"
+port = 4002
+client_id = 100
+account = "DUQ212633"
+runtime_mode = "paper"
+read_only = false
+connect_on_start = true
+run_mode = "scheduled"
+scan_schedule = "0 45 9,12,15 * * MON-FRI"
+market_data_mode = "live"
+
+[universe]
+tickers_file = "docs/50_stocks_list.csv"
+# tickers = ["AAPL", "MSFT"]
+
+[strategy]
+expiration_dates = ["20260501"]
+min_underlying_price = 1.0
+max_underlying_price = 20.0
+min_profit_dollars_per_share = 0.05
+min_profit_pct_of_investment = 1.0
+min_profit_buffer_pct = 0.10
+min_annualized_yield_pct = 12.0
+min_itm_depth_pct = 0.0
+max_itm_depth_pct = 0.50
+min_option_bid = 0.08
+max_option_spread_pct = 0.25
+default_beta = 1.5
+
+[allocation]
+deployment_budget = 10000.0
+capital_source = "available_funds"
+max_cash_per_symbol_pct = 20.0
+min_cash_reserve_pct = 5.0
+max_new_trades_per_cycle = 1
+max_open_positions = 3
+
+[performance]
+symbol_concurrency = 4
+option_quote_concurrency_per_symbol = 2
+max_underlyings_per_cycle = 50
+max_option_quotes_per_underlying = 3
+
+[execution]
+enable_paper_orders = true
+enable_live_orders = false
+auto_reprice = true
+reprice_attempts = 3
+reprice_wait_seconds = 2
+min_buying_power_buffer_pct = 5.0
