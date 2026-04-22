@@ -54,7 +54,7 @@ Suggested settings to review in the TOML file:
 - `[strategy].expiration_dates`
 - `[allocation].deployment_budget`
 - `[allocation].capital_source`
-- `[allocation].max_cash_per_symbol_pct`
+- `[allocation].max_distribution_per_symbol_pct`
 - `[allocation].min_cash_reserve_pct`
 - `[execution].enable_paper_orders`
 - `[execution].auto_reprice`
@@ -103,6 +103,9 @@ Recommended starting values:
 - `expiration_dates = ["20260515"]`
 - `deployment_budget = 10000.0`
 - `capital_source = "available_funds"`
+- `max_distribution_per_symbol_pct = 20.0`
+- `max_new_trades_per_cycle = 5`
+- `max_open_positions = 5`
 - `auto_reprice = true`
 - `reprice_attempts = 3`
 - `reprice_wait_seconds = 2`

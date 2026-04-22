@@ -17,6 +17,17 @@ pub struct OrderIntentBuildResult {
     pub allocation_summary: AllocationSummary,
 }
 
+#[derive(Debug, Clone)]
+struct CandidateAllocationPlan {
+    candidate: ScoredOptionCandidate,
+    stock_ask: f64,
+    combo_limit_price: f64,
+    expiration_profit_per_share: f64,
+    estimated_net_debit_per_lot: f64,
+    existing_symbol_allocation: f64,
+    max_lots_by_symbol_cap: i32,
+}
+
 pub fn summarize_open_positions(positions: &[InventoryPosition]) -> Vec<OpenPositionState> {
     let mut by_symbol: BTreeMap<String, OpenPositionState> = BTreeMap::new();
 
@@ -63,207 +74,142 @@ pub fn build_order_intents(
         &capital_source_details.preview
     };
     let collapsed_candidates = collapse_candidates_by_symbol(candidates);
-    let mut remaining_cash = sizing_view.deployable_cash;
+    let existing_symbol_allocations =
+        estimated_symbol_allocations(&open_positions, sizing_view.max_cash_per_symbol);
+    let existing_symbols = existing_symbol_allocations
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let existing_allocated_cash = existing_symbol_allocations.values().sum::<f64>();
+    let mut remaining_cash = (sizing_view.deployable_cash - existing_allocated_cash).max(0.0);
+    let current_open_symbols = existing_symbols.len();
+    let mut candidate_plans = Vec::new();
 
-    let existing_symbols: BTreeSet<String> = open_positions
-        .iter()
-        .filter(|position| {
-            position.stock_shares.abs() >= 100.0 || position.short_call_contracts > 0.0
-        })
-        .map(|position| position.symbol.clone())
-        .collect();
-    let mut blocked_symbols = existing_symbols.clone();
-
-    let currently_open = existing_symbols.len();
     for candidate in &collapsed_candidates {
+        let existing_symbol_allocation = existing_symbol_allocations
+            .get(&candidate.symbol)
+            .copied()
+            .unwrap_or(0.0);
+        match build_candidate_allocation_plan(
+            candidate,
+            config,
+            sizing_view,
+            existing_symbol_allocation,
+        ) {
+            Ok(plan) => candidate_plans.push(plan),
+            Err(rejection) => rejections.push(rejection),
+        }
+    }
+
+    if remaining_cash > 0.0 {
+        let projected_remaining_cash = greedy_remaining_cash_after_distribution(
+            &candidate_plans,
+            &existing_symbols,
+            current_open_symbols,
+            config,
+            remaining_cash,
+        );
+        let min_one_lot_debit = candidate_plans
+            .iter()
+            .map(|plan| plan.estimated_net_debit_per_lot)
+            .fold(f64::INFINITY, f64::min);
+        let should_refuse_partial_deployment = if min_one_lot_debit.is_finite() {
+            projected_remaining_cash + 0.005 >= min_one_lot_debit
+        } else {
+            projected_remaining_cash > 0.0
+        };
+
+        if should_refuse_partial_deployment {
+            rejections.push(GuardrailRejection {
+                symbol: "allocation".to_string(),
+                stage: "risk".to_string(),
+                reason: format!(
+                    "capped per-symbol distribution can only absorb {:.2} of the remaining deployment budget {:.2}; refusing partial deployment",
+                    remaining_cash - projected_remaining_cash,
+                    remaining_cash
+                ),
+            });
+            remaining_cash = (sizing_view.deployable_cash - existing_allocated_cash).max(0.0);
+            return OrderIntentBuildResult {
+                allocation_summary: AllocationSummary {
+                    candidate_symbols_considered: collapsed_candidates.len(),
+                    selected_symbols: 0,
+                    total_lots: 0,
+                    allocated_cash: sizing_view.deployable_cash - remaining_cash,
+                    remaining_cash,
+                },
+                capital_source_details,
+                intents,
+                rejections,
+                open_positions,
+            };
+        }
+    }
+
+    let mut new_symbol_intents = 0usize;
+    for plan in candidate_plans {
+        if remaining_cash <= 0.0 {
+            break;
+        }
         if intents.len() >= config.risk.max_new_trades_per_cycle {
             break;
         }
 
-        if blocked_symbols.contains(&candidate.symbol) {
+        let consumes_new_open_slot = !existing_symbols.contains(&plan.candidate.symbol);
+        if consumes_new_open_slot
+            && current_open_symbols + new_symbol_intents >= config.risk.max_open_positions
+        {
             rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "risk".to_string(),
-                reason: "symbol already has an open stock or option position".to_string(),
-            });
-            continue;
-        }
-
-        if currently_open + intents.len() >= config.risk.max_open_positions {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
+                symbol: plan.candidate.symbol.clone(),
                 stage: "risk".to_string(),
                 reason: format!(
                     "max open position cap {} would be exceeded",
                     config.risk.max_open_positions
                 ),
             });
-            break;
-        }
-
-        let Some(stock_ask) = candidate.underlying_ask else {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: "missing underlying ask required for combo BAG debit pricing".to_string(),
-            });
-            continue;
-        };
-
-        let combo_limit_price = floor_to_cents(combo_limit_price_from_profit_floor(
-            candidate,
-            &config.strategy,
-        ));
-        if combo_limit_price <= 0.0 {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: format!(
-                    "combo debit {:.2} is non-positive after applying the configured profit-floor guardrails",
-                    combo_limit_price
-                ),
-            });
-            continue;
-        }
-
-        let expiration_profit_per_share = (candidate.strike - combo_limit_price).max(0.0);
-        if expiration_profit_per_share < config.strategy.min_expiration_profit_per_share {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: format!(
-                    "combo BAG debit {:.2} yields only {:.2} expiration profit per share, below configured minimum {:.2}",
-                    combo_limit_price,
-                    expiration_profit_per_share,
-                    config.strategy.min_expiration_profit_per_share
-                ),
-            });
-            continue;
-        }
-
-        let expiration_yield_pct = (expiration_profit_per_share / combo_limit_price) * 100.0;
-        if expiration_yield_pct < config.strategy.min_expiration_yield_pct {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: format!(
-                    "combo BAG debit {:.2} yields only {:.2}% to expiration, below configured minimum {:.2}%",
-                    combo_limit_price,
-                    expiration_yield_pct,
-                    config.strategy.min_expiration_yield_pct
-                ),
-            });
-            continue;
-        }
-
-        let annualized_yield_pct =
-            expiration_yield_pct / (candidate.days_to_expiration as f64 / 365.0);
-        if annualized_yield_pct < config.strategy.min_annualized_yield_pct {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: format!(
-                    "combo BAG debit {:.2} yields only {:.2}% annualized, below configured minimum {:.2}%",
-                    combo_limit_price,
-                    annualized_yield_pct,
-                    config.strategy.min_annualized_yield_pct
-                ),
-            });
-            continue;
-        }
-
-        let estimated_stock_cost = stock_ask * 100.0;
-        let estimated_net_debit_per_lot = combo_limit_price * 100.0;
-        let sizing_amount = sizing_view.reported_amount;
-
-        match sizing_amount {
-            Some(_) => {}
-            None => {
-                rejections.push(GuardrailRejection {
-                    symbol: candidate.symbol.clone(),
-                    stage: "risk".to_string(),
-                    reason: missing_capital_reason(config, sizing_view),
-                });
-                continue;
-            }
-        }
-
-        if estimated_net_debit_per_lot <= 0.0 {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "pricing".to_string(),
-                reason: format!(
-                    "combo BAG debit {:.2} does not leave any positive deployable cash per lot",
-                    estimated_net_debit_per_lot
-                ),
-            });
             continue;
         }
 
         let max_lots_by_remaining_cash =
-            (remaining_cash / estimated_net_debit_per_lot).floor() as i32;
+            (remaining_cash / plan.estimated_net_debit_per_lot).floor() as i32;
         if max_lots_by_remaining_cash < 1 {
             rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
+                symbol: plan.candidate.symbol.clone(),
                 stage: "risk".to_string(),
                 reason: format!(
-                    "remaining deployable cash {:.2} is below one-lot debit {:.2}",
-                    remaining_cash, estimated_net_debit_per_lot
+                    "remaining deployment budget {:.2} is below one-lot debit {:.2}",
+                    remaining_cash, plan.estimated_net_debit_per_lot
                 ),
             });
             continue;
         }
 
-        let max_lots_by_symbol_cap =
-            (sizing_view.max_cash_per_symbol / estimated_net_debit_per_lot).floor() as i32;
-        if max_lots_by_symbol_cap < 1 {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "risk".to_string(),
-                reason: format!(
-                    "per-symbol cash cap {:.2} is below one-lot debit {:.2}",
-                    sizing_view.max_cash_per_symbol, estimated_net_debit_per_lot
-                ),
-            });
-            continue;
-        }
-
-        let lot_quantity = max_lots_by_remaining_cash.min(max_lots_by_symbol_cap);
+        let lot_quantity = max_lots_by_remaining_cash.min(plan.max_lots_by_symbol_cap);
         if lot_quantity < 1 {
             rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
+                symbol: plan.candidate.symbol.clone(),
                 stage: "risk".to_string(),
                 reason: format!(
-                    "no lot quantity fit within remaining deployable cash {:.2} and per-symbol cap {:.2}",
-                    remaining_cash, sizing_view.max_cash_per_symbol
+                    "no lot quantity fit within remaining deployment budget {:.2} and per-symbol distribution headroom {:.2}",
+                    remaining_cash,
+                    (sizing_view.max_cash_per_symbol - plan.existing_symbol_allocation).max(0.0)
                 ),
             });
             continue;
         }
 
-        let estimated_credit = candidate.option_bid * 100.0 * lot_quantity as f64;
-        let estimated_net_debit = estimated_net_debit_per_lot * lot_quantity as f64;
-        let max_profit = expiration_profit_per_share * 100.0 * lot_quantity as f64;
+        let estimated_credit = plan.candidate.option_bid * 100.0 * lot_quantity as f64;
+        let estimated_net_debit = plan.estimated_net_debit_per_lot * lot_quantity as f64;
+        let max_profit = plan.expiration_profit_per_share * 100.0 * lot_quantity as f64;
         let stock_quantity = 100 * lot_quantity;
 
-        if estimated_stock_cost > 0.0 && estimated_net_debit > 0.0 {
-            remaining_cash = (remaining_cash - estimated_net_debit).max(0.0);
-        } else {
-            rejections.push(GuardrailRejection {
-                symbol: candidate.symbol.clone(),
-                stage: "risk".to_string(),
-                reason: if config.guarded_paper_submission_enabled() {
-                    "guarded paper routing requires IBKR AVAILABLE_FUNDS for the configured paper account"
-                        .to_string()
-                } else {
-                    "missing deployable cash from the selected capital source".to_string()
-                },
-            });
-            continue;
+        remaining_cash = (remaining_cash - estimated_net_debit).max(0.0);
+        if consumes_new_open_slot {
+            new_symbol_intents += 1;
         }
 
         intents.push(OrderIntent {
-            symbol: candidate.symbol.clone(),
+            symbol: plan.candidate.symbol.clone(),
             strategy: "deep-ITM covered-call buy-write".to_string(),
             account: account.account.clone(),
             mode: if config.guarded_paper_submission_enabled() {
@@ -272,7 +218,7 @@ pub fn build_order_intents(
                 "analysis-only".to_string()
             },
             lot_quantity,
-            combo_limit_price: Some(combo_limit_price),
+            combo_limit_price: Some(plan.combo_limit_price),
             estimated_net_debit,
             estimated_credit,
             max_profit,
@@ -280,11 +226,14 @@ pub fn build_order_intents(
                 OrderLegIntent {
                     instrument_type: InstrumentType::Stock,
                     action: TradeAction::Buy,
-                    contract_id: Some(candidate.underlying_contract_id),
-                    symbol: candidate.symbol.clone(),
-                    description: format!("Buy {stock_quantity} shares of {}", candidate.symbol),
+                    contract_id: Some(plan.candidate.underlying_contract_id),
+                    symbol: plan.candidate.symbol.clone(),
+                    description: format!(
+                        "Buy {stock_quantity} shares of {}",
+                        plan.candidate.symbol
+                    ),
                     quantity: stock_quantity,
-                    limit_price: Some(stock_ask),
+                    limit_price: Some(plan.stock_ask),
                     expiry: None,
                     strike: None,
                     right: None,
@@ -296,25 +245,27 @@ pub fn build_order_intents(
                 OrderLegIntent {
                     instrument_type: InstrumentType::Option,
                     action: TradeAction::Sell,
-                    contract_id: Some(candidate.option_contract_id),
-                    symbol: candidate.symbol.clone(),
+                    contract_id: Some(plan.candidate.option_contract_id),
+                    symbol: plan.candidate.symbol.clone(),
                     description: format!(
                         "Sell {} deep-ITM covered call contract(s) {} {} {}",
-                        lot_quantity, candidate.symbol, candidate.expiry, candidate.strike
+                        lot_quantity,
+                        plan.candidate.symbol,
+                        plan.candidate.expiry,
+                        plan.candidate.strike
                     ),
                     quantity: lot_quantity,
-                    limit_price: Some(candidate.option_bid),
-                    expiry: Some(candidate.expiry.clone()),
-                    strike: Some(candidate.strike),
-                    right: Some(candidate.right.clone()),
-                    exchange: Some(candidate.exchange.clone()),
-                    trading_class: Some(candidate.trading_class.clone()),
-                    multiplier: Some(candidate.multiplier.clone()),
+                    limit_price: Some(plan.candidate.option_bid),
+                    expiry: Some(plan.candidate.expiry.clone()),
+                    strike: Some(plan.candidate.strike),
+                    right: Some(plan.candidate.right.clone()),
+                    exchange: Some(plan.candidate.exchange.clone()),
+                    trading_class: Some(plan.candidate.trading_class.clone()),
+                    multiplier: Some(plan.candidate.multiplier.clone()),
                     currency: Some("USD".to_string()),
                 },
             ],
         });
-        blocked_symbols.insert(candidate.symbol.clone());
     }
 
     OrderIntentBuildResult {
@@ -389,9 +340,9 @@ fn capital_allocation_view(
     let reported_amount = reported_amount.filter(|value| value.is_finite() && *value > 0.0);
     let reserve_amount = reported_amount.unwrap_or(0.0) * (reserve_pct.max(0.0) / 100.0);
     let cash_after_reserve = (reported_amount.unwrap_or(0.0) - reserve_amount).max(0.0);
-    let deployable_cash = cash_after_reserve.min(deployment_budget.max(0.0));
-    let max_cash_per_symbol =
-        (cash_after_reserve * (max_cash_per_symbol_pct.max(0.0) / 100.0)).min(deployable_cash);
+    let deployment_budget = deployment_budget.max(0.0);
+    let deployable_cash = cash_after_reserve.min(deployment_budget);
+    let max_cash_per_symbol = deployment_budget * (max_cash_per_symbol_pct.max(0.0) / 100.0);
 
     CapitalAllocationView {
         source: source.to_string(),
@@ -403,6 +354,205 @@ fn capital_allocation_view(
         deployable_cash,
         max_cash_per_symbol,
     }
+}
+
+fn build_candidate_allocation_plan(
+    candidate: &ScoredOptionCandidate,
+    config: &AppConfig,
+    sizing_view: &CapitalAllocationView,
+    existing_symbol_allocation: f64,
+) -> Result<CandidateAllocationPlan, GuardrailRejection> {
+    let Some(stock_ask) = candidate.underlying_ask else {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: "missing underlying ask required for combo BAG debit pricing".to_string(),
+        });
+    };
+
+    let combo_limit_price = floor_to_cents(combo_limit_price_from_profit_floor(
+        candidate,
+        &config.strategy,
+    ));
+    if combo_limit_price <= 0.0 {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: format!(
+                "combo debit {:.2} is non-positive after applying the configured profit-floor guardrails",
+                combo_limit_price
+            ),
+        });
+    }
+
+    let expiration_profit_per_share = (candidate.strike - combo_limit_price).max(0.0);
+    if expiration_profit_per_share < config.strategy.min_expiration_profit_per_share {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: format!(
+                "combo BAG debit {:.2} yields only {:.2} expiration profit per share, below configured minimum {:.2}",
+                combo_limit_price,
+                expiration_profit_per_share,
+                config.strategy.min_expiration_profit_per_share
+            ),
+        });
+    }
+
+    let expiration_yield_pct = (expiration_profit_per_share / combo_limit_price) * 100.0;
+    if expiration_yield_pct < config.strategy.min_expiration_yield_pct {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: format!(
+                "combo BAG debit {:.2} yields only {:.2}% to expiration, below configured minimum {:.2}%",
+                combo_limit_price, expiration_yield_pct, config.strategy.min_expiration_yield_pct
+            ),
+        });
+    }
+
+    let annualized_yield_pct = expiration_yield_pct / (candidate.days_to_expiration as f64 / 365.0);
+    if annualized_yield_pct < config.strategy.min_annualized_yield_pct {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: format!(
+                "combo BAG debit {:.2} yields only {:.2}% annualized, below configured minimum {:.2}%",
+                combo_limit_price, annualized_yield_pct, config.strategy.min_annualized_yield_pct
+            ),
+        });
+    }
+
+    if sizing_view.reported_amount.is_none() {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "risk".to_string(),
+            reason: missing_capital_reason(config, sizing_view),
+        });
+    }
+
+    let estimated_net_debit_per_lot = combo_limit_price * 100.0;
+    if estimated_net_debit_per_lot <= 0.0 {
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "pricing".to_string(),
+            reason: format!(
+                "combo BAG debit {:.2} does not leave any positive deployable cash per lot",
+                estimated_net_debit_per_lot
+            ),
+        });
+    }
+
+    let per_symbol_headroom =
+        (sizing_view.max_cash_per_symbol - existing_symbol_allocation).max(0.0);
+    let max_lots_by_symbol_cap = (per_symbol_headroom / estimated_net_debit_per_lot).floor() as i32;
+    if max_lots_by_symbol_cap < 1 {
+        let reason = if existing_symbol_allocation > 0.0 {
+            format!(
+                "remaining per-symbol distribution headroom {:.2} after existing brokerage exposure {:.2} is below one-lot debit {:.2}",
+                per_symbol_headroom, existing_symbol_allocation, estimated_net_debit_per_lot
+            )
+        } else {
+            format!(
+                "per-symbol distribution cap {:.2} is below one-lot debit {:.2}",
+                sizing_view.max_cash_per_symbol, estimated_net_debit_per_lot
+            )
+        };
+        return Err(GuardrailRejection {
+            symbol: candidate.symbol.clone(),
+            stage: "risk".to_string(),
+            reason,
+        });
+    }
+
+    Ok(CandidateAllocationPlan {
+        candidate: candidate.clone(),
+        stock_ask,
+        combo_limit_price,
+        expiration_profit_per_share,
+        estimated_net_debit_per_lot,
+        existing_symbol_allocation,
+        max_lots_by_symbol_cap,
+    })
+}
+
+fn estimated_symbol_allocations(
+    open_positions: &[OpenPositionState],
+    per_symbol_distribution_cap: f64,
+) -> BTreeMap<String, f64> {
+    open_positions
+        .iter()
+        .filter_map(|position| {
+            let allocation =
+                estimate_open_position_allocation(position, per_symbol_distribution_cap);
+            if allocation > 0.0 {
+                Some((position.symbol.clone(), allocation))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn estimate_open_position_allocation(
+    position: &OpenPositionState,
+    per_symbol_distribution_cap: f64,
+) -> f64 {
+    let effective_share_count = position
+        .stock_shares
+        .abs()
+        .max(position.short_call_contracts.max(0.0) * 100.0);
+
+    if effective_share_count <= 0.0 {
+        return 0.0;
+    }
+
+    match position.average_stock_cost {
+        Some(cost) if cost.is_finite() && cost > 0.0 => effective_share_count * cost,
+        _ if position.short_call_contracts > 0.0 => per_symbol_distribution_cap,
+        _ => 0.0,
+    }
+}
+
+fn greedy_remaining_cash_after_distribution(
+    plans: &[CandidateAllocationPlan],
+    existing_symbols: &BTreeSet<String>,
+    current_open_symbols: usize,
+    config: &AppConfig,
+    starting_cash: f64,
+) -> f64 {
+    let mut remaining_cash = starting_cash;
+    let mut remaining_trade_slots = config.risk.max_new_trades_per_cycle;
+    let mut additional_open_symbols = 0usize;
+
+    for plan in plans {
+        if remaining_trade_slots == 0 || remaining_cash <= 0.0 {
+            break;
+        }
+
+        let consumes_new_open_slot = !existing_symbols.contains(&plan.candidate.symbol);
+        if consumes_new_open_slot
+            && current_open_symbols + additional_open_symbols >= config.risk.max_open_positions
+        {
+            continue;
+        }
+
+        let max_lots_by_remaining_cash =
+            (remaining_cash / plan.estimated_net_debit_per_lot).floor() as i32;
+        let lot_quantity = max_lots_by_remaining_cash.min(plan.max_lots_by_symbol_cap);
+        if lot_quantity < 1 {
+            continue;
+        }
+
+        remaining_cash =
+            (remaining_cash - plan.estimated_net_debit_per_lot * lot_quantity as f64).max(0.0);
+        remaining_trade_slots -= 1;
+        if consumes_new_open_slot {
+            additional_open_symbols += 1;
+        }
+    }
+
+    remaining_cash
 }
 
 fn missing_capital_reason(config: &AppConfig, sizing_view: &CapitalAllocationView) -> String {
@@ -469,8 +619,16 @@ mod tests {
             symbols: vec!["AAPL".to_string()],
             startup_warnings: Vec::new(),
             strategy: StrategyConfig::default(),
-            risk: RiskConfig::default(),
-            allocation: AllocationConfig::default(),
+            risk: RiskConfig {
+                max_new_trades_per_cycle: 5,
+                max_open_positions: 5,
+                ..RiskConfig::default()
+            },
+            allocation: AllocationConfig {
+                max_cash_per_symbol_pct: 100.0,
+                min_cash_reserve_pct: 0.0,
+                ..AllocationConfig::default()
+            },
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
         }
@@ -499,6 +657,33 @@ mod tests {
             expiration_profit_per_share: 4.0,
             annualized_yield_pct: 20.0,
             expiration_yield_pct: 4.0,
+            score: 0.2,
+        }
+    }
+
+    fn spread_candidate(symbol: &str) -> ScoredOptionCandidate {
+        ScoredOptionCandidate {
+            symbol: symbol.to_string(),
+            beta: 1.1,
+            underlying_contract_id: 1001,
+            underlying_price: 25.0,
+            underlying_ask: Some(25.05),
+            option_contract_id: 2001,
+            strike: 20.0,
+            expiry: "20260515".to_string(),
+            right: "C".to_string(),
+            exchange: "SMART".to_string(),
+            trading_class: symbol.to_string(),
+            multiplier: "100".to_string(),
+            days_to_expiration: 30,
+            option_bid: 5.5,
+            option_ask: Some(5.6),
+            delta: Some(0.8),
+            itm_depth_pct: 0.1,
+            downside_buffer_pct: 0.14,
+            expiration_profit_per_share: 0.2,
+            annualized_yield_pct: 20.0,
+            expiration_yield_pct: 1.0,
             score: 0.2,
         }
     }
@@ -534,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_duplicate_symbols() {
+    fn existing_brokerage_positions_consume_symbol_distribution_headroom() {
         let candidate = ScoredOptionCandidate {
             symbol: "AAPL".to_string(),
             beta: 1.1,
@@ -579,10 +764,23 @@ mod tests {
             },
             &positions,
             &[candidate],
-            &test_config(),
+            &AppConfig {
+                allocation: AllocationConfig {
+                    deployment_budget: 10_000.0,
+                    max_cash_per_symbol_pct: 20.0,
+                    min_cash_reserve_pct: 0.0,
+                    ..AllocationConfig::default()
+                },
+                ..test_config()
+            },
         );
 
-        assert_eq!(result.rejections.len(), 1);
+        assert!(result.intents.is_empty());
+        assert!(result.rejections.iter().any(|rejection| {
+            rejection
+                .reason
+                .contains("existing brokerage exposure 9000.00")
+        }));
     }
 
     #[test]
@@ -905,7 +1103,7 @@ mod tests {
         assert!(result.rejections.iter().any(|rejection| {
             rejection
                 .reason
-                .contains("remaining deployable cash 8500.00 is below one-lot debit 8910.00")
+                .contains("remaining deployment budget 8500.00 is below one-lot debit 8910.00")
         }));
         assert_eq!(
             result.capital_source_details.routed_orders.reserve_amount,
@@ -943,8 +1141,124 @@ mod tests {
         assert!(result.rejections.iter().any(|rejection| {
             rejection
                 .reason
-                .contains("per-symbol cash cap 5000.00 is below one-lot debit 8910.00")
+                .contains("per-symbol distribution cap 5000.00 is below one-lot debit 8910.00")
         }));
+    }
+
+    #[test]
+    fn allocation_spreads_budget_across_five_symbols_under_default_distribution_cap() {
+        let result = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[
+                spread_candidate("AAPL"),
+                spread_candidate("MSFT"),
+                spread_candidate("NVDA"),
+                spread_candidate("AMD"),
+                spread_candidate("META"),
+            ],
+            &AppConfig {
+                allocation: AllocationConfig {
+                    deployment_budget: 10_000.0,
+                    max_cash_per_symbol_pct: 20.0,
+                    min_cash_reserve_pct: 0.0,
+                    ..AllocationConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert!(result.rejections.is_empty());
+        assert_eq!(result.intents.len(), 5);
+        assert!(result.intents.iter().all(|intent| intent.lot_quantity == 1));
+        assert_eq!(result.allocation_summary.total_lots, 5);
+        assert_eq!(result.allocation_summary.allocated_cash, 9_900.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 100.0);
+    }
+
+    #[test]
+    fn allocation_stops_when_not_enough_symbols_can_cover_budget_under_cap() {
+        let result = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &[],
+            &[
+                spread_candidate("AAPL"),
+                spread_candidate("MSFT"),
+                spread_candidate("NVDA"),
+                spread_candidate("AMD"),
+            ],
+            &AppConfig {
+                allocation: AllocationConfig {
+                    deployment_budget: 10_000.0,
+                    max_cash_per_symbol_pct: 20.0,
+                    min_cash_reserve_pct: 0.0,
+                    ..AllocationConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert!(result.intents.is_empty());
+        assert!(
+            result
+                .rejections
+                .iter()
+                .any(|rejection| { rejection.reason.contains("refusing partial deployment") })
+        );
+    }
+
+    #[test]
+    fn existing_positions_reduce_remaining_distribution_budget_across_runs() {
+        let positions = vec![InventoryPosition {
+            account: "DU123".to_string(),
+            symbol: "AAPL".to_string(),
+            security_type: "STK".to_string(),
+            quantity: 100.0,
+            average_cost: 19.8,
+            expiry: None,
+            strike: None,
+            right: None,
+        }];
+
+        let result = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &positions,
+            &[
+                spread_candidate("MSFT"),
+                spread_candidate("NVDA"),
+                spread_candidate("AMD"),
+                spread_candidate("META"),
+            ],
+            &AppConfig {
+                allocation: AllocationConfig {
+                    deployment_budget: 9_900.0,
+                    max_cash_per_symbol_pct: 20.0,
+                    min_cash_reserve_pct: 0.0,
+                    ..AllocationConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert!(result.rejections.is_empty());
+        assert_eq!(result.intents.len(), 4);
+        assert_eq!(result.allocation_summary.allocated_cash, 9_900.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 0.0);
     }
 
     #[test]

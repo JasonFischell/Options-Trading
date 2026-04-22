@@ -32,10 +32,10 @@ default_beta = 1.5
 [allocation]
 deployment_budget = 10000.0
 capital_source = "available_funds"
-max_cash_per_symbol_pct = 20.0
+max_distribution_per_symbol_pct = 20.0
 min_cash_reserve_pct = 5.0
-max_new_trades_per_cycle = 1
-max_open_positions = 3
+max_new_trades_per_cycle = 5
+max_open_positions = 5
 
 [performance]
 symbol_concurrency = 4

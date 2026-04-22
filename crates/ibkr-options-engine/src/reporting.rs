@@ -485,7 +485,7 @@ fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
 
     vec![
         format!(
-            "- Configured source={} | preview source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployment budget {:.2} | deployable {:.2} | per-symbol cap {:.2}",
+            "- Configured source={} | preview source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployment budget {:.2} | deployable {:.2} | per-symbol distribution cap {:.2}",
             report.capital_source_details.configured_source,
             preview.source,
             preview.reported_amount,
@@ -497,7 +497,7 @@ fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
             preview.max_cash_per_symbol
         ),
         format!(
-            "- Routed orders source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployable {:.2} | per-symbol cap {:.2}",
+            "- Routed orders source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployable {:.2} | per-symbol distribution cap {:.2}",
             routed.source,
             routed.reported_amount,
             routed.reserve_pct,
@@ -1017,7 +1017,7 @@ mod tests {
                     cash_after_reserve: 9_500.0,
                     deployment_budget: 10_000.0,
                     deployable_cash: 9_500.0,
-                    max_cash_per_symbol: 1_900.0,
+                    max_cash_per_symbol: 2_000.0,
                 },
                 routed_orders: CapitalAllocationView {
                     source: "available_funds".to_string(),
@@ -1027,7 +1027,7 @@ mod tests {
                     cash_after_reserve: 9_500.0,
                     deployment_budget: 10_000.0,
                     deployable_cash: 9_500.0,
-                    max_cash_per_symbol: 1_900.0,
+                    max_cash_per_symbol: 2_000.0,
                 },
             },
             allocation_summary: AllocationSummary {

@@ -171,8 +171,8 @@ impl Default for RiskConfig {
             max_underlying_price: 20.0,
             max_underlyings_per_cycle: 50,
             max_option_quotes_per_underlying: 3,
-            max_new_trades_per_cycle: 1,
-            max_open_positions: 3,
+            max_new_trades_per_cycle: 5,
+            max_open_positions: 5,
             min_buying_power_buffer_pct: 5.0,
             enable_paper_orders: false,
             enable_live_orders: false,
@@ -527,8 +527,9 @@ impl ConfigOverrides {
                 CapitalSource::parse,
             )?,
             max_cash_per_symbol_pct: parse_optional_num(
-                first_optional_env(&["MAX_CASH_PER_SYMBOL_PCT"]).as_deref(),
-                "MAX_CASH_PER_SYMBOL_PCT",
+                first_optional_env(&["MAX_DISTRIBUTION_PER_SYMBOL_PCT", "MAX_CASH_PER_SYMBOL_PCT"])
+                    .as_deref(),
+                "MAX_DISTRIBUTION_PER_SYMBOL_PCT",
             )?,
             min_cash_reserve_pct: parse_optional_num(
                 first_optional_env(&["MIN_CASH_RESERVE_PCT"]).as_deref(),
@@ -911,6 +912,7 @@ struct StrategySection {
 struct AllocationSection {
     deployment_budget: Option<f64>,
     capital_source: Option<String>,
+    max_distribution_per_symbol_pct: Option<f64>,
     max_cash_per_symbol_pct: Option<f64>,
     min_cash_reserve_pct: Option<f64>,
     max_new_trades_per_cycle: Option<usize>,
@@ -1004,7 +1006,9 @@ impl FileConfig {
                 normalize_optional_string(allocation.capital_source).as_deref(),
                 CapitalSource::parse,
             )?,
-            max_cash_per_symbol_pct: allocation.max_cash_per_symbol_pct,
+            max_cash_per_symbol_pct: allocation
+                .max_distribution_per_symbol_pct
+                .or(allocation.max_cash_per_symbol_pct),
             min_cash_reserve_pct: allocation.min_cash_reserve_pct,
             symbol_concurrency: performance.symbol_concurrency,
             option_quote_concurrency_per_symbol: performance.option_quote_concurrency_per_symbol,
@@ -1186,6 +1190,7 @@ mod tests {
             "ENABLE_LIVE_ORDERS",
             "DEPLOYMENT_BUDGET",
             "CAPITAL_SOURCE",
+            "MAX_DISTRIBUTION_PER_SYMBOL_PCT",
             "MAX_CASH_PER_SYMBOL_PCT",
             "MIN_CASH_RESERVE_PCT",
             "SYMBOL_CONCURRENCY",
@@ -1245,6 +1250,7 @@ expiration_dates = ["20260619"]
 [allocation]
 deployment_budget = 2500
 capital_source = "buying_power"
+max_distribution_per_symbol_pct = 15
 "#,
         )
         .unwrap();
@@ -1255,6 +1261,7 @@ capital_source = "buying_power"
         assert_eq!(config.strategy.expiration_dates, vec!["20260619"]);
         assert_eq!(config.allocation.deployment_budget, 2500.0);
         assert_eq!(config.allocation.capital_source, CapitalSource::BuyingPower);
+        assert_eq!(config.allocation.max_cash_per_symbol_pct, 15.0);
         assert!(
             config
                 .startup_warnings
@@ -1335,13 +1342,23 @@ enable_paper_orders = true
     #[test]
     fn default_values_match_wrapper_expectations() {
         clear_env();
-        unsafe {
-            std::env::set_var("IBKR_ACCOUNT", "DU1234567");
-            std::env::set_var("IBKR_SYMBOLS", "AAPL");
-            std::env::set_var("EXPIRATION_DATES", "20260515");
-        }
+        let path = temp_config_path("defaults");
+        std::fs::write(
+            &path,
+            r#"
+[broker]
+account = "DU1234567"
 
-        let config = AppConfig::from_env().unwrap();
+[universe]
+tickers = ["AAPL"]
+
+[strategy]
+expiration_dates = ["20260515"]
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::from_path(Some(&path)).unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.platform, BrokerPlatform::Gateway);
         assert_eq!(config.mode, RuntimeMode::Paper);
@@ -1352,10 +1369,14 @@ enable_paper_orders = true
             config.allocation.capital_source,
             CapitalSource::AvailableFunds
         );
+        assert_eq!(config.allocation.max_cash_per_symbol_pct, 20.0);
+        assert_eq!(config.risk.max_new_trades_per_cycle, 5);
+        assert_eq!(config.risk.max_open_positions, 5);
         assert_eq!(config.strategy.min_expiration_profit_per_share, 0.05);
         assert_eq!(config.strategy.min_expiration_yield_pct, 1.0);
         assert_eq!(config.strategy.min_downside_buffer_pct, 0.10);
 
+        std::fs::remove_file(path).unwrap();
         clear_env();
     }
 }
