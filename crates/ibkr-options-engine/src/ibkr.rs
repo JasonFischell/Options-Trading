@@ -124,6 +124,8 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
     let tags = &[
         AccountSummaryTags::NET_LIQUIDATION,
         AccountSummaryTags::AVAILABLE_FUNDS,
+        AccountSummaryTags::FULL_AVAILABLE_FUNDS,
+        AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS,
         AccountSummaryTags::BUYING_POWER,
     ];
 
@@ -138,17 +140,24 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         buying_power: None,
         net_liquidation: None,
     };
+    let mut fallback_available_funds = None;
 
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive IBKR account summary update")? {
             AccountSummaryResult::Summary(summary) => {
-                if summary.account != account {
+                if !account_summary_matches(account, &summary.account) {
                     continue;
                 }
 
                 let parsed_value = summary.value.parse::<f64>().ok();
                 match summary.tag.as_str() {
                     AccountSummaryTags::AVAILABLE_FUNDS => state.available_funds = parsed_value,
+                    AccountSummaryTags::FULL_AVAILABLE_FUNDS
+                    | AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS => {
+                        if fallback_available_funds.is_none() {
+                            fallback_available_funds = parsed_value;
+                        }
+                    }
                     AccountSummaryTags::BUYING_POWER => state.buying_power = parsed_value,
                     AccountSummaryTags::NET_LIQUIDATION => state.net_liquidation = parsed_value,
                     _ => {}
@@ -158,7 +167,33 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         }
     }
 
+    if state.available_funds.is_none() {
+        state.available_funds = fallback_available_funds;
+    }
+
     Ok(state)
+}
+
+fn account_summary_matches(configured_account: &str, summary_account: &str) -> bool {
+    let configured = normalized_account_id(configured_account);
+    let summary = normalized_account_id(summary_account);
+
+    if configured.is_empty() || summary.is_empty() {
+        return configured == summary;
+    }
+
+    configured == summary
+        || configured.ends_with(&summary)
+        || summary.ends_with(&configured)
+}
+
+fn normalized_account_id(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 pub async fn fetch_positions(client: &Client) -> Result<Vec<InventoryPosition>> {
@@ -970,7 +1005,8 @@ mod tests {
 
     use super::{
         OptionChainMetadata, OptionChainSummary, SelectedOptionContract, SnapshotSummary,
-        merge_snapshot_summary, normalize_market_price, option_resolution_candidates,
+        account_summary_matches, merge_snapshot_summary, normalize_market_price,
+        normalized_account_id, option_resolution_candidates,
         parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
@@ -1293,5 +1329,19 @@ mod tests {
 
         assert_eq!(selected.len(), 2);
         assert!(selected.iter().all(|contract| contract.expiration == far_expiry));
+    }
+
+    #[test]
+    fn account_summary_match_accepts_trimmed_and_suffix_variants() {
+        assert!(account_summary_matches("DU1234567", "DU1234567"));
+        assert!(account_summary_matches(" DU1234567 ", "du1234567"));
+        assert!(account_summary_matches("DU1234567", "U1234567"));
+        assert!(account_summary_matches("U1234567", "DU1234567"));
+        assert!(!account_summary_matches("DU1234567", "DU7654321"));
+    }
+
+    #[test]
+    fn normalized_account_id_strips_non_alphanumeric_characters() {
+        assert_eq!(normalized_account_id(" du-123 4567 "), "DU1234567");
     }
 }
