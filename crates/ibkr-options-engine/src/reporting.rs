@@ -282,6 +282,12 @@ pub fn render_status_log(config: &AppConfig, report: &StatusReport) -> String {
             config.mode, report.connect_on_start
         ),
         format!(
+            "Account summary: buying_power={:?}, available_funds={:?}, net_liquidation={:?}",
+            report.account_state.buying_power,
+            report.account_state.available_funds,
+            report.account_state.net_liquidation
+        ),
+        format!(
             "Capital policy: source={} deployment_budget={:.2}",
             report.capital_source, report.deployment_budget
         ),
@@ -1073,6 +1079,12 @@ mod tests {
             platform: "IB Gateway".to_string(),
             runtime_mode: "Paper".to_string(),
             connect_on_start: true,
+            account_state: crate::models::AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(12_500.0),
+                buying_power: Some(25_000.0),
+                net_liquidation: Some(18_000.0),
+            },
             capital_source: "available_funds".to_string(),
             deployment_budget: 10_000.0,
             open_orders: vec![BrokerOpenOrder {
@@ -1137,6 +1149,7 @@ mod tests {
         let log = render_status_log(&test_config(), &report);
 
         assert!(log.contains("At a glance: 1 open position group(s), 1 open order(s), 1 completed order(s), 1 paper ledger record(s)"));
+        assert!(log.contains("Account summary: buying_power=Some(25000.0), available_funds=Some(12500.0), net_liquidation=Some(18000.0)"));
         assert!(log.contains("Open-order statuses: Submitted=1"));
         assert!(log.contains("Ledger statuses: open-covered-call=1"));
         assert!(log.contains("Paper Lifecycle Ledger:"));

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use ibapi::Error as IbkrError;
-use ibapi::accounts::types::AccountGroup;
-use ibapi::accounts::{AccountSummaryResult, AccountSummaryTags, PositionUpdate};
+use ibapi::accounts::types::{AccountGroup, AccountId};
+use ibapi::accounts::{AccountSummaryResult, AccountSummaryTags, AccountUpdate, PositionUpdate};
 use ibapi::market_data::MarketDataType;
 use ibapi::market_data::realtime::{TickPriceSize, TickType, TickTypes};
 use ibapi::orders::Orders;
@@ -121,6 +121,45 @@ pub async fn connect(endpoint: &str, client_id: i32) -> Result<Client> {
 }
 
 pub async fn fetch_account_state(client: &Client, account: &str) -> Result<AccountState> {
+    let mut state = AccountState {
+        account: account.to_string(),
+        available_funds: None,
+        buying_power: None,
+        net_liquidation: None,
+    };
+    let mut fallback_available_funds = None;
+
+    populate_account_state_from_summary(
+        client,
+        account,
+        &mut state,
+        &mut fallback_available_funds,
+    )
+    .await?;
+
+    if !has_any_account_metric(&state) {
+        populate_account_state_from_updates(
+            client,
+            account,
+            &mut state,
+            &mut fallback_available_funds,
+        )
+        .await?;
+    }
+
+    if state.available_funds.is_none() {
+        state.available_funds = fallback_available_funds;
+    }
+
+    Ok(state)
+}
+
+async fn populate_account_state_from_summary(
+    client: &Client,
+    account: &str,
+    state: &mut AccountState,
+    fallback_available_funds: &mut Option<f64>,
+) -> Result<()> {
     let tags = &[
         AccountSummaryTags::NET_LIQUIDATION,
         AccountSummaryTags::AVAILABLE_FUNDS,
@@ -134,14 +173,6 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         .await
         .context("failed to request IBKR account summary")?;
 
-    let mut state = AccountState {
-        account: account.to_string(),
-        available_funds: None,
-        buying_power: None,
-        net_liquidation: None,
-    };
-    let mut fallback_available_funds = None;
-
     while let Some(result) = subscription.next().await {
         match result.context("failed to receive IBKR account summary update")? {
             AccountSummaryResult::Summary(summary) => {
@@ -149,29 +180,95 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
                     continue;
                 }
 
-                let parsed_value = summary.value.parse::<f64>().ok();
-                match summary.tag.as_str() {
-                    AccountSummaryTags::AVAILABLE_FUNDS => state.available_funds = parsed_value,
-                    AccountSummaryTags::FULL_AVAILABLE_FUNDS
-                    | AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS => {
-                        if fallback_available_funds.is_none() {
-                            fallback_available_funds = parsed_value;
-                        }
-                    }
-                    AccountSummaryTags::BUYING_POWER => state.buying_power = parsed_value,
-                    AccountSummaryTags::NET_LIQUIDATION => state.net_liquidation = parsed_value,
-                    _ => {}
-                }
+                apply_account_metric(
+                    state,
+                    fallback_available_funds,
+                    &summary.tag,
+                    summary.value.parse::<f64>().ok(),
+                );
             }
             AccountSummaryResult::End => break,
         }
     }
 
-    if state.available_funds.is_none() {
-        state.available_funds = fallback_available_funds;
+    Ok(())
+}
+
+async fn populate_account_state_from_updates(
+    client: &Client,
+    account: &str,
+    state: &mut AccountState,
+    fallback_available_funds: &mut Option<f64>,
+) -> Result<()> {
+    let mut subscription = client
+        .account_updates(&AccountId::from(account))
+        .await
+        .context("failed to request IBKR account updates")?;
+
+    while let Some(result) = subscription.next().await {
+        match result.context("failed to receive IBKR account update")? {
+            AccountUpdate::AccountValue(value) => {
+                if let Some(update_account) = value.account.as_deref() {
+                    if !account_summary_matches(account, update_account) {
+                        continue;
+                    }
+                }
+
+                apply_account_metric(
+                    state,
+                    fallback_available_funds,
+                    &value.key,
+                    value.value.parse::<f64>().ok(),
+                );
+            }
+            AccountUpdate::End => break,
+            AccountUpdate::PortfolioValue(_) | AccountUpdate::UpdateTime(_) => {}
+        }
     }
 
-    Ok(state)
+    Ok(())
+}
+
+fn apply_account_metric(
+    state: &mut AccountState,
+    fallback_available_funds: &mut Option<f64>,
+    key: &str,
+    parsed_value: Option<f64>,
+) {
+    match canonical_account_metric_key(key) {
+        Some(AccountSummaryTags::AVAILABLE_FUNDS) => state.available_funds = parsed_value,
+        Some(AccountSummaryTags::FULL_AVAILABLE_FUNDS)
+        | Some(AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS) => {
+            if fallback_available_funds.is_none() {
+                *fallback_available_funds = parsed_value;
+            }
+        }
+        Some(AccountSummaryTags::BUYING_POWER) => state.buying_power = parsed_value,
+        Some(AccountSummaryTags::NET_LIQUIDATION) => state.net_liquidation = parsed_value,
+        _ => {}
+    }
+}
+
+fn canonical_account_metric_key(key: &str) -> Option<&'static str> {
+    for candidate in [
+        AccountSummaryTags::AVAILABLE_FUNDS,
+        AccountSummaryTags::FULL_AVAILABLE_FUNDS,
+        AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS,
+        AccountSummaryTags::BUYING_POWER,
+        AccountSummaryTags::NET_LIQUIDATION,
+    ] {
+        if key == candidate || key.starts_with(&format!("{candidate}-")) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn has_any_account_metric(state: &AccountState) -> bool {
+    state.available_funds.is_some()
+        || state.buying_power.is_some()
+        || state.net_liquidation.is_some()
 }
 
 fn account_summary_matches(configured_account: &str, summary_account: &str) -> bool {
@@ -1005,14 +1102,15 @@ mod tests {
 
     use super::{
         OptionChainMetadata, OptionChainSummary, SelectedOptionContract, SnapshotSummary,
-        account_summary_matches, merge_snapshot_summary, normalize_market_price,
-        normalized_account_id, option_resolution_candidates,
+        account_summary_matches, canonical_account_metric_key, merge_snapshot_summary,
+        normalize_market_price, normalized_account_id, option_resolution_candidates,
         parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
         AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
         PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
     };
+    use ibapi::accounts::AccountSummaryTags;
 
     #[test]
     fn selects_least_itm_contracts_first_within_allowed_expiration_dates() {
@@ -1343,5 +1441,21 @@ mod tests {
     #[test]
     fn normalized_account_id_strips_non_alphanumeric_characters() {
         assert_eq!(normalized_account_id(" du-123 4567 "), "DU1234567");
+    }
+
+    #[test]
+    fn canonical_account_metric_key_accepts_segment_suffixes() {
+        assert_eq!(
+            canonical_account_metric_key("AvailableFunds-S"),
+            Some(AccountSummaryTags::AVAILABLE_FUNDS)
+        );
+        assert_eq!(
+            canonical_account_metric_key("BuyingPower-C"),
+            Some(AccountSummaryTags::BUYING_POWER)
+        );
+        assert_eq!(
+            canonical_account_metric_key("NetLiquidation-S"),
+            Some(AccountSummaryTags::NET_LIQUIDATION)
+        );
     }
 }

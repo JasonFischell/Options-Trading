@@ -5,7 +5,10 @@ use ibkr_options_engine::{
     cli::{Cli, Command, ConfigArgs},
     config::AppConfig,
     execution::GuardedPaperOrderExecutor,
-    ibkr::{connect, fetch_completed_orders, fetch_open_orders, fetch_positions, log_server_time},
+    ibkr::{
+        connect, fetch_account_state, fetch_completed_orders, fetch_open_orders, fetch_positions,
+        log_server_time,
+    },
     market_data::{IbkrMarketDataProvider, load_universe},
     models::StatusReport,
     paper_state::PaperTradeLedger,
@@ -102,6 +105,7 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
     let client = connect(&config.endpoint(), config.client_id).await?;
     log_server_time(&client).await?;
 
+    let account_state = fetch_account_state(&client, &config.account).await?;
     let positions = fetch_positions(&client).await?;
     let open_positions = summarize_open_positions(&positions);
     let open_orders = fetch_open_orders(&client, &config.account).await?;
@@ -119,6 +123,7 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
         platform: config.platform.label().to_string(),
         runtime_mode: format!("{:?}", config.mode),
         connect_on_start: config.connect_on_start,
+        account_state,
         capital_source: config.allocation.capital_source.label().to_string(),
         deployment_budget: config.allocation.deployment_budget,
         open_orders,

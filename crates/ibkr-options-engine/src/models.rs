@@ -466,6 +466,7 @@ pub struct StatusReport {
     pub platform: String,
     pub runtime_mode: String,
     pub connect_on_start: bool,
+    pub account_state: AccountState,
     pub capital_source: String,
     pub deployment_budget: f64,
     pub open_orders: Vec<BrokerOpenOrder>,
