@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
@@ -261,8 +261,13 @@ impl AppConfig {
 
     pub fn from_path(path: Option<&Path>) -> Result<Self> {
         let mut merged = ConfigOverrides::from_env()?;
-        if let Some(path) = path {
-            merged.apply(ConfigOverrides::from_file(path)?);
+        let config_path = path.map(Path::to_path_buf).or_else(default_config_path);
+        if let Some(path) = config_path.as_deref() {
+            let mut file_overrides = ConfigOverrides::from_file(path)?;
+            file_overrides
+                .startup_warnings
+                .push(format!("Loaded configuration from {}.", path.display()));
+            merged.apply(file_overrides);
         }
         merged.build()
     }
@@ -304,6 +309,17 @@ impl AppConfig {
     pub fn guarded_paper_submission_enabled(&self) -> bool {
         self.guarded_paper_submission_requested() && !self.read_only
     }
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    [
+        "ibkr-options-engine.paper-trading.toml",
+        "ibkr-options-engine.toml",
+    ]
+    .into_iter()
+    .map(|name| cwd.join(name))
+    .find(|path| path.is_file())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -357,7 +373,8 @@ impl ConfigOverrides {
         let mut startup_warnings = Vec::new();
         let raw_universe_file = first_raw_optional_env(&["UNIVERSE_FILE", "TICKERS_FILE"]);
         let raw_symbols = first_raw_optional_env(&["IBKR_SYMBOLS", "TICKERS"]);
-        let raw_expirations = first_raw_optional_env(&["EXPIRATION_DATES", "OPTION_EXPIRATION_DATES"]);
+        let raw_expirations =
+            first_raw_optional_env(&["EXPIRATION_DATES", "OPTION_EXPIRATION_DATES"]);
 
         if raw_universe_file
             .as_deref()
@@ -389,12 +406,24 @@ impl ConfigOverrides {
 
         Ok(Self {
             host: first_optional_env(&["IBKR_HOST"]),
-            platform: parse_optional(first_optional_env(&["IBKR_PLATFORM"]).as_deref(), BrokerPlatform::parse)?,
+            platform: parse_optional(
+                first_optional_env(&["IBKR_PLATFORM"]).as_deref(),
+                BrokerPlatform::parse,
+            )?,
             port: parse_optional_num(first_optional_env(&["IBKR_PORT"]).as_deref(), "IBKR_PORT")?,
-            client_id: parse_optional_num(first_optional_env(&["IBKR_CLIENT_ID"]).as_deref(), "IBKR_CLIENT_ID")?,
+            client_id: parse_optional_num(
+                first_optional_env(&["IBKR_CLIENT_ID"]).as_deref(),
+                "IBKR_CLIENT_ID",
+            )?,
             account: first_optional_env(&["IBKR_ACCOUNT"]),
-            mode: parse_optional(first_optional_env(&["IBKR_RUNTIME_MODE"]).as_deref(), RuntimeMode::parse)?,
-            read_only: parse_optional(first_optional_env(&["IBKR_READ_ONLY"]).as_deref(), parse_bool)?,
+            mode: parse_optional(
+                first_optional_env(&["IBKR_RUNTIME_MODE"]).as_deref(),
+                RuntimeMode::parse,
+            )?,
+            read_only: parse_optional(
+                first_optional_env(&["IBKR_READ_ONLY"]).as_deref(),
+                parse_bool,
+            )?,
             connect_on_start: parse_optional(
                 first_optional_env(&["IBKR_CONNECT_ON_START"]).as_deref(),
                 parse_bool,
@@ -411,17 +440,17 @@ impl ConfigOverrides {
                 raw_expirations,
                 normalize_expiry_list_raw,
             )?,
-            default_beta: parse_optional_num(first_optional_env(&["DEFAULT_BETA"]).as_deref(), "DEFAULT_BETA")?,
+            default_beta: parse_optional_num(
+                first_optional_env(&["DEFAULT_BETA"]).as_deref(),
+                "DEFAULT_BETA",
+            )?,
             min_annualized_yield_pct: parse_optional_num(
                 first_optional_env(&["MIN_ANNUALIZED_YIELD_PCT"]).as_deref(),
                 "MIN_ANNUALIZED_YIELD_PCT",
             )?,
             min_expiration_yield_pct: parse_optional_num(
-                first_optional_env(&[
-                    "MIN_PROFIT_PCT_OF_INVESTMENT",
-                    "MIN_EXPIRATION_YIELD_PCT",
-                ])
-                .as_deref(),
+                first_optional_env(&["MIN_PROFIT_PCT_OF_INVESTMENT", "MIN_EXPIRATION_YIELD_PCT"])
+                    .as_deref(),
                 "MIN_PROFIT_PCT_OF_INVESTMENT",
             )?,
             min_expiration_profit_per_share: parse_optional_num(
@@ -441,11 +470,8 @@ impl ConfigOverrides {
                 "MAX_ITM_DEPTH_PCT",
             )?,
             min_downside_buffer_pct: parse_optional_num(
-                first_optional_env(&[
-                    "MIN_PROFIT_BUFFER_PCT",
-                    "MIN_DOWNSIDE_BUFFER_PCT",
-                ])
-                .as_deref(),
+                first_optional_env(&["MIN_PROFIT_BUFFER_PCT", "MIN_DOWNSIDE_BUFFER_PCT"])
+                    .as_deref(),
                 "MIN_PROFIT_BUFFER_PCT",
             )?,
             min_option_bid: parse_optional_num(
@@ -593,7 +619,9 @@ impl ConfigOverrides {
         self.min_buying_power_buffer_pct = higher
             .min_buying_power_buffer_pct
             .or(self.min_buying_power_buffer_pct.take());
-        self.enable_paper_orders = higher.enable_paper_orders.or(self.enable_paper_orders.take());
+        self.enable_paper_orders = higher
+            .enable_paper_orders
+            .or(self.enable_paper_orders.take());
         self.enable_live_orders = higher.enable_live_orders.or(self.enable_live_orders.take());
         self.deployment_budget = higher.deployment_budget.or(self.deployment_budget.take());
         self.capital_source = higher.capital_source.or(self.capital_source.take());
@@ -637,7 +665,9 @@ impl ConfigOverrides {
         let scan_schedule = self
             .scan_schedule
             .unwrap_or_else(|| "0 45 9,12,15 * * MON-FRI".to_string());
-        let market_data_mode = self.market_data_mode.unwrap_or(MarketDataMode::DelayedFrozen);
+        let market_data_mode = self
+            .market_data_mode
+            .unwrap_or(MarketDataMode::DelayedFrozen);
         let explicit_universe_file = self.universe_file.into_option();
         let symbols = self.symbols.into_vec();
         let expiration_dates = self.expiration_dates.into_vec();
@@ -665,7 +695,9 @@ impl ConfigOverrides {
             deployment_budget: self
                 .deployment_budget
                 .unwrap_or(allocation_defaults.deployment_budget),
-            capital_source: self.capital_source.unwrap_or(allocation_defaults.capital_source),
+            capital_source: self
+                .capital_source
+                .unwrap_or(allocation_defaults.capital_source),
             max_cash_per_symbol_pct: self
                 .max_cash_per_symbol_pct
                 .unwrap_or(allocation_defaults.max_cash_per_symbol_pct),
@@ -716,7 +748,9 @@ impl ConfigOverrides {
                 min_downside_buffer_pct: self
                     .min_downside_buffer_pct
                     .unwrap_or(strategy_defaults.min_downside_buffer_pct),
-                min_option_bid: self.min_option_bid.unwrap_or(strategy_defaults.min_option_bid),
+                min_option_bid: self
+                    .min_option_bid
+                    .unwrap_or(strategy_defaults.min_option_bid),
                 max_option_spread_pct: self
                     .max_option_spread_pct
                     .unwrap_or(strategy_defaults.max_option_spread_pct),
@@ -912,14 +946,23 @@ impl FileConfig {
 
         Ok(ConfigOverrides {
             host: normalize_optional_string(broker.host),
-            platform: parse_optional(normalize_optional_string(broker.platform).as_deref(), BrokerPlatform::parse)?,
+            platform: parse_optional(
+                normalize_optional_string(broker.platform).as_deref(),
+                BrokerPlatform::parse,
+            )?,
             port: broker.port,
             client_id: broker.client_id,
             account: normalize_optional_string(broker.account),
-            mode: parse_optional(normalize_optional_string(broker.runtime_mode).as_deref(), RuntimeMode::parse)?,
+            mode: parse_optional(
+                normalize_optional_string(broker.runtime_mode).as_deref(),
+                RuntimeMode::parse,
+            )?,
             read_only: broker.read_only,
             connect_on_start: broker.connect_on_start,
-            run_mode: parse_optional(normalize_optional_string(broker.run_mode).as_deref(), RunMode::parse)?,
+            run_mode: parse_optional(
+                normalize_optional_string(broker.run_mode).as_deref(),
+                RunMode::parse,
+            )?,
             scan_schedule: normalize_optional_string(broker.scan_schedule),
             market_data_mode: parse_optional(
                 normalize_optional_string(broker.market_data_mode).as_deref(),
@@ -1003,7 +1046,9 @@ impl StringListValue {
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_expiry_list_raw(raw: String) -> Result<Vec<String>> {
@@ -1051,7 +1096,11 @@ where
     T::Err: std::fmt::Display,
 {
     value
-        .map(|value| value.parse().map_err(|error| anyhow::anyhow!("{label} must be numeric: {error}")))
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| anyhow::anyhow!("{label} must be numeric: {error}"))
+        })
         .transpose()
 }
 
@@ -1082,7 +1131,17 @@ mod tests {
     };
 
     fn temp_config_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ibkr-options-engine-{name}-{}.toml", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "ibkr-options-engine-{name}-{}.toml",
+            std::process::id()
+        ))
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ibkr-options-engine-{name}-dir-{}",
+            std::process::id()
+        ))
     }
 
     fn clear_env() {
@@ -1196,11 +1255,61 @@ capital_source = "buying_power"
         assert_eq!(config.strategy.expiration_dates, vec!["20260619"]);
         assert_eq!(config.allocation.deployment_budget, 2500.0);
         assert_eq!(config.allocation.capital_source, CapitalSource::BuyingPower);
-        assert!(config.startup_warnings.iter().any(|warning| {
-            warning.contains("analysis-only")
-        }));
+        assert!(
+            config
+                .startup_warnings
+                .iter()
+                .any(|warning| { warning.contains("analysis-only") })
+        );
 
         std::fs::remove_file(path).unwrap();
+        clear_env();
+    }
+
+    #[test]
+    fn auto_loads_default_paper_trading_config_from_current_directory() {
+        clear_env();
+
+        let original_dir = std::env::current_dir().unwrap();
+        let test_dir = temp_test_dir("autodiscover");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let path = test_dir.join("ibkr-options-engine.paper-trading.toml");
+        std::fs::write(
+            &path,
+            r#"
+[broker]
+account = "DU-AUTO"
+read_only = false
+connect_on_start = true
+
+[universe]
+tickers = ["NVTS"]
+
+[strategy]
+expiration_dates = ["20260501"]
+
+[execution]
+enable_paper_orders = true
+"#,
+        )
+        .unwrap();
+
+        std::env::set_current_dir(&test_dir).unwrap();
+        let config = AppConfig::from_env().unwrap();
+
+        assert_eq!(config.account, "DU-AUTO");
+        assert_eq!(config.symbols, vec!["NVTS"]);
+        assert!(!config.read_only);
+        assert!(config.connect_on_start);
+        assert!(config.risk.enable_paper_orders);
+        assert!(config.startup_warnings.iter().any(|warning| {
+            warning.contains("Loaded configuration from")
+                && warning.contains("ibkr-options-engine.paper-trading.toml")
+        }));
+
+        std::env::set_current_dir(&original_dir).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(test_dir).unwrap();
         clear_env();
     }
 
@@ -1233,7 +1342,10 @@ capital_source = "buying_power"
         assert_eq!(config.run_mode, RunMode::Scheduled);
         assert_eq!(config.market_data_mode, MarketDataMode::DelayedFrozen);
         assert_eq!(config.allocation.deployment_budget, 10_000.0);
-        assert_eq!(config.allocation.capital_source, CapitalSource::AvailableFunds);
+        assert_eq!(
+            config.allocation.capital_source,
+            CapitalSource::AvailableFunds
+        );
         assert_eq!(config.strategy.min_expiration_profit_per_share, 0.05);
         assert_eq!(config.strategy.min_expiration_yield_pct, 1.0);
         assert_eq!(config.strategy.min_downside_buffer_pct, 0.10);
