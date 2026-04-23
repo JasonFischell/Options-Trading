@@ -998,10 +998,9 @@ mod tests {
                 && rejection.reason == "no usable market data snapshot returned"
         }));
         assert!(
-            report
-                .action_log
-                .iter()
-                .any(|entry| entry.contains("000430: no market-data snapshot was returned by IBKR."))
+            report.action_log.iter().any(
+                |entry| entry.contains("000430: no market-data snapshot was returned by IBKR.")
+            )
         );
 
         clear_test_ledger_dir("DU123");

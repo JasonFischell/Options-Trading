@@ -1205,12 +1205,11 @@ mod tests {
         assert_eq!(result.allocation_summary.total_lots, 4);
         assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
         assert_eq!(result.allocation_summary.remaining_cash, 2_080.0);
-        assert!(
-            result
-                .rejections
-                .iter()
-                .any(|rejection| { rejection.reason.contains("proceeding with the valid subset") })
-        );
+        assert!(result.rejections.iter().any(|rejection| {
+            rejection
+                .reason
+                .contains("proceeding with the valid subset")
+        }));
     }
 
     #[test]
@@ -1257,7 +1256,9 @@ mod tests {
         assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
         assert_eq!(result.allocation_summary.remaining_cash, 1_980.0);
         assert!(result.rejections.iter().any(|rejection| {
-            rejection.reason.contains("proceeding with the valid subset")
+            rejection
+                .reason
+                .contains("proceeding with the valid subset")
         }));
     }
 
