@@ -11,10 +11,9 @@ use ibapi::{
 use ibkr_options_engine::{
     config::AppConfig,
     ibkr::{
-        cancel_open_order, connect, fetch_account_state, fetch_completed_orders,
-        fetch_open_orders, fetch_positions, log_server_time, request_option_quote,
-        request_underlying_snapshot, resolve_option_contract, resolve_primary_stock_contract,
-        switch_market_data_mode,
+        cancel_open_order, connect, fetch_account_state, fetch_completed_orders, fetch_open_orders,
+        fetch_positions, log_server_time, request_option_quote, request_underlying_snapshot,
+        resolve_option_contract, resolve_primary_stock_contract, switch_market_data_mode,
     },
     models::{
         BrokerCompletedOrder, BrokerOpenOrder, InventoryPosition, OpenPositionState,
@@ -315,7 +314,9 @@ async fn build_close_bag_plans(
 
     for open_position in open_positions {
         if !requested_symbols.is_empty()
-            && !requested_symbols.iter().any(|symbol| symbol == &open_position.symbol)
+            && !requested_symbols
+                .iter()
+                .any(|symbol| symbol == &open_position.symbol)
         {
             continue;
         }
@@ -328,9 +329,13 @@ async fn build_close_bag_plans(
 
     for symbol in requested_symbols {
         if !plans.iter().any(|plan| &plan.symbol == symbol)
-            && !skipped.iter().any(|line| line.starts_with(&format!("{symbol}:")))
+            && !skipped
+                .iter()
+                .any(|line| line.starts_with(&format!("{symbol}:")))
         {
-            skipped.push(format!("{symbol}: symbol was requested but no open position is present"));
+            skipped.push(format!(
+                "{symbol}: symbol was requested but no open position is present"
+            ));
         }
     }
 
@@ -364,9 +369,17 @@ async fn build_close_bag_plan(
                 && position.quantity < 0.0
                 && position.expiry.is_some()
                 && position.strike.is_some()
-                && position.right.as_deref().is_some_and(|right| right.eq_ignore_ascii_case("C"))
+                && position
+                    .right
+                    .as_deref()
+                    .is_some_and(|right| right.eq_ignore_ascii_case("C"))
         })
-        .with_context(|| format!("missing short call position details for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing short call position details for {}",
+                open_position.symbol
+            )
+        })?;
 
     let stock_contract = resolve_primary_stock_contract(client, &open_position.symbol).await?;
     let selected = ibkr_options_engine::ibkr::SelectedOptionContract {
@@ -392,13 +405,23 @@ async fn build_close_bag_plan(
         .bid
         .or(underlying.last)
         .or(underlying.close)
-        .with_context(|| format!("missing usable stock exit price for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing usable stock exit price for {}",
+                open_position.symbol
+            )
+        })?;
     let option_cover_price = option_quote
         .ask
         .or(option_quote.last)
         .or(option_quote.close)
         .or(option_quote.option_price)
-        .with_context(|| format!("missing usable option cover price for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing usable option cover price for {}",
+                open_position.symbol
+            )
+        })?;
     let estimated_limit_credit = round_to_cents(stock_exit_price - option_cover_price);
     if estimated_limit_credit <= 0.0 {
         anyhow::bail!(
@@ -436,7 +459,11 @@ async fn build_close_bag_plan(
     })
 }
 
-async fn submit_close_bag_order(client: &Client, config: &AppConfig, plan: &CloseBagPlan) -> Result<i32> {
+async fn submit_close_bag_order(
+    client: &Client,
+    config: &AppConfig,
+    plan: &CloseBagPlan,
+) -> Result<i32> {
     let order_id = client.next_order_id();
     let contract = Contract {
         symbol: Symbol::from(plan.symbol.as_str()),
@@ -464,23 +491,7 @@ async fn submit_close_bag_order(client: &Client, config: &AppConfig, plan: &Clos
         ..Default::default()
     };
 
-    let mut order = order_builder::combo_limit_order(
-        Action::Sell,
-        plan.lots as f64,
-        plan.estimated_limit_credit,
-        false,
-    );
-    order.account = config.account.clone();
-    order.order_type = "LMT".to_string();
-    order.limit_price = Some(plan.estimated_limit_credit);
-    order.tif = TimeInForce::Day;
-    order.transmit = true;
-    order.outside_rth = false;
-    order.order_ref = format!("deepitm-buywrite:{}:combo:close", plan.symbol);
-    order.smart_combo_routing_params = vec![TagValue {
-        tag: "NonGuaranteed".to_string(),
-        value: "0".to_string(),
-    }];
+    let order = build_close_bag_order(plan, &config.account);
 
     let mut subscription = client
         .place_order(order_id, &contract, &order)
@@ -507,6 +518,30 @@ async fn submit_close_bag_order(client: &Client, config: &AppConfig, plan: &Clos
     Ok(order_id)
 }
 
+fn build_close_bag_order(plan: &CloseBagPlan, account: &str) -> ibapi::orders::Order {
+    let mut order = order_builder::combo_limit_order(
+        Action::Sell,
+        plan.lots as f64,
+        plan.estimated_limit_credit,
+        false,
+    );
+    order.account = account.to_string();
+    order.order_type = "LMT".to_string();
+    order.limit_price = Some(plan.estimated_limit_credit);
+    order.tif = TimeInForce::Day;
+    order.transmit = true;
+    order.outside_rth = false;
+    order.order_ref = format!("deepitm-buywrite:{}:combo:close", plan.symbol);
+    order.smart_combo_routing_params = vec![TagValue {
+        tag: "NonGuaranteed".to_string(),
+        value: "0".to_string(),
+    }];
+    // IBKR marks covered-call unwind BAGs as payout combos and rejects them unless
+    // we explicitly accept the advanced combo warning that TWS exposes as a checkbox.
+    order.advanced_error_override = "8229=COMBOPAYOUT".to_string();
+    order
+}
+
 fn is_terminal_order_status(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
@@ -528,7 +563,10 @@ fn round_to_cents(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{completed_order_is_filled, normalize_symbols, normalized_order_bucket};
+    use super::{
+        CloseBagPlan, build_close_bag_order, completed_order_is_filled, normalize_symbols,
+        normalized_order_bucket,
+    };
     use ibkr_options_engine::models::BrokerCompletedOrder;
 
     #[test]
@@ -568,6 +606,39 @@ mod tests {
 
     #[test]
     fn normalizes_symbol_filters() {
-        assert_eq!(normalize_symbols(&[" aapl ".to_string(), "msft".to_string()]), vec!["AAPL", "MSFT"]);
+        assert_eq!(
+            normalize_symbols(&[" aapl ".to_string(), "msft".to_string()]),
+            vec!["AAPL", "MSFT"]
+        );
+    }
+
+    #[test]
+    fn close_bag_orders_include_combo_payout_override() {
+        let plan = CloseBagPlan {
+            symbol: "SERV".to_string(),
+            stock_contract_id: 689676896,
+            option_contract_id: 868707703,
+            lots: 3,
+            stock_shares: 300,
+            stock_bid: Some(9.36),
+            stock_last: Some(9.3605),
+            option_ask: Some(1.33),
+            option_last: Some(1.2),
+            estimated_limit_credit: 8.03,
+            expiry: "20260508".to_string(),
+            strike: 8.5,
+            right: "C".to_string(),
+            notes: vec![],
+        };
+
+        let order = build_close_bag_order(&plan, "DUQ212633");
+
+        assert_eq!(order.account, "DUQ212633");
+        assert_eq!(order.order_ref, "deepitm-buywrite:SERV:combo:close");
+        assert_eq!(order.limit_price, Some(8.03));
+        assert_eq!(order.advanced_error_override, "8229=COMBOPAYOUT");
+        assert_eq!(order.smart_combo_routing_params.len(), 1);
+        assert_eq!(order.smart_combo_routing_params[0].tag, "NonGuaranteed");
+        assert_eq!(order.smart_combo_routing_params[0].value, "0");
     }
 }
