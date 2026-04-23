@@ -322,6 +322,7 @@ pub struct AllocationSummary {
     pub candidate_symbols_considered: usize,
     pub selected_symbols: usize,
     pub total_lots: i32,
+    pub existing_exposure_cash: f64,
     pub allocated_cash: f64,
     pub remaining_cash: f64,
 }

@@ -507,10 +507,11 @@ fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
             routed.max_cash_per_symbol
         ),
         format!(
-            "- Collapsed candidate symbols {} | selected symbols {} | total lots {} | allocated cash {:.2} | remaining cash {:.2}",
+            "- Collapsed candidate symbols {} | selected symbols {} | total lots {} | existing exposure {:.2} | newly allocated cash {:.2} | remaining cash {:.2}",
             report.allocation_summary.candidate_symbols_considered,
             report.allocation_summary.selected_symbols,
             report.allocation_summary.total_lots,
+            report.allocation_summary.existing_exposure_cash,
             report.allocation_summary.allocated_cash,
             report.allocation_summary.remaining_cash
         ),
@@ -983,13 +984,13 @@ mod tests {
                 execution_step_timings: Vec::new(),
             }],
             open_positions: vec![OpenPositionState {
-                symbol: "AAPL".to_string(),
+                symbol: "ORCL".to_string(),
                 stock_shares: 100.0,
                 short_call_contracts: 1.0,
                 average_stock_cost: Some(100.0),
             }],
             paper_trade_lifecycle: vec![PaperTradeLifecycleRecord {
-                symbol: "AAPL".to_string(),
+                symbol: "ORCL".to_string(),
                 intent_key: "intent".to_string(),
                 status: "combo-submitted".to_string(),
                 first_recorded_at: Utc::now(),
@@ -1034,6 +1035,7 @@ mod tests {
                 candidate_symbols_considered: 1,
                 selected_symbols: 1,
                 total_lots: 1,
+                existing_exposure_cash: 2_000.0,
                 allocated_cash: 8_925.0,
                 remaining_cash: 575.0,
             },
@@ -1121,13 +1123,13 @@ mod tests {
                 completed_time: "20260421 14:00:00 America/Denver".to_string(),
             }],
             open_positions: vec![OpenPositionState {
-                symbol: "AAPL".to_string(),
+                symbol: "ORCL".to_string(),
                 stock_shares: 100.0,
                 short_call_contracts: 1.0,
                 average_stock_cost: Some(100.0),
             }],
             paper_trade_lifecycle: vec![PaperTradeLifecycleRecord {
-                symbol: "AAPL".to_string(),
+                symbol: "ORCL".to_string(),
                 intent_key: "intent".to_string(),
                 status: "open-covered-call".to_string(),
                 first_recorded_at: Utc::now(),

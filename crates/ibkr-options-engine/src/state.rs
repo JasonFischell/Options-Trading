@@ -80,8 +80,8 @@ pub fn build_order_intents(
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let existing_allocated_cash = existing_symbol_allocations.values().sum::<f64>();
-    let mut remaining_cash = (sizing_view.deployable_cash - existing_allocated_cash).max(0.0);
+    let existing_exposure_cash = existing_symbol_allocations.values().sum::<f64>();
+    let mut remaining_cash = sizing_view.deployable_cash;
     let current_open_symbols = existing_symbols.len();
     let mut candidate_plans = Vec::new();
 
@@ -124,25 +124,11 @@ pub fn build_order_intents(
                 symbol: "allocation".to_string(),
                 stage: "risk".to_string(),
                 reason: format!(
-                    "capped per-symbol distribution can only absorb {:.2} of the remaining deployment budget {:.2}; refusing partial deployment",
+                    "capped per-symbol distribution can only absorb {:.2} of the remaining deployment budget {:.2}; proceeding with the valid subset",
                     remaining_cash - projected_remaining_cash,
                     remaining_cash
                 ),
             });
-            remaining_cash = (sizing_view.deployable_cash - existing_allocated_cash).max(0.0);
-            return OrderIntentBuildResult {
-                allocation_summary: AllocationSummary {
-                    candidate_symbols_considered: collapsed_candidates.len(),
-                    selected_symbols: 0,
-                    total_lots: 0,
-                    allocated_cash: sizing_view.deployable_cash - remaining_cash,
-                    remaining_cash,
-                },
-                capital_source_details,
-                intents,
-                rejections,
-                open_positions,
-            };
         }
     }
 
@@ -273,6 +259,7 @@ pub fn build_order_intents(
             candidate_symbols_considered: collapsed_candidates.len(),
             selected_symbols: intents.len(),
             total_lots: intents.iter().map(|intent| intent.lot_quantity).sum(),
+            existing_exposure_cash,
             allocated_cash: sizing_view.deployable_cash - remaining_cash,
             remaining_cash,
         },
@@ -693,7 +680,7 @@ mod tests {
         let positions = vec![
             InventoryPosition {
                 account: "DU123".to_string(),
-                symbol: "AAPL".to_string(),
+                symbol: "IBM".to_string(),
                 security_type: "STK".to_string(),
                 quantity: 100.0,
                 average_cost: 180.0,
@@ -703,7 +690,7 @@ mod tests {
             },
             InventoryPosition {
                 account: "DU123".to_string(),
-                symbol: "AAPL".to_string(),
+                symbol: "IBM".to_string(),
                 security_type: "OPT".to_string(),
                 quantity: -1.0,
                 average_cost: 2.0,
@@ -721,7 +708,7 @@ mod tests {
     #[test]
     fn existing_brokerage_positions_consume_symbol_distribution_headroom() {
         let candidate = ScoredOptionCandidate {
-            symbol: "AAPL".to_string(),
+            symbol: "IBM".to_string(),
             beta: 1.1,
             underlying_contract_id: 1001,
             underlying_price: 100.0,
@@ -731,7 +718,7 @@ mod tests {
             expiry: "20260515".to_string(),
             right: "C".to_string(),
             exchange: "SMART".to_string(),
-            trading_class: "AAPL".to_string(),
+            trading_class: "IBM".to_string(),
             multiplier: "100".to_string(),
             days_to_expiration: 30,
             option_bid: 1.5,
@@ -746,7 +733,7 @@ mod tests {
         };
         let positions = vec![InventoryPosition {
             account: "DU123".to_string(),
-            symbol: "AAPL".to_string(),
+            symbol: "IBM".to_string(),
             security_type: "STK".to_string(),
             quantity: 100.0,
             average_cost: 90.0,
@@ -781,6 +768,9 @@ mod tests {
                 .reason
                 .contains("existing brokerage exposure 9000.00")
         }));
+        assert_eq!(result.allocation_summary.existing_exposure_cash, 9_000.0);
+        assert_eq!(result.allocation_summary.allocated_cash, 0.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 10_000.0);
     }
 
     #[test]
@@ -1073,6 +1063,7 @@ mod tests {
         assert!(result.rejections.is_empty());
         assert_eq!(result.intents.len(), 1);
         assert_eq!(result.intents[0].lot_quantity, 2);
+        assert_eq!(result.allocation_summary.existing_exposure_cash, 0.0);
         assert_eq!(result.allocation_summary.allocated_cash, 17_820.0);
         assert_eq!(result.allocation_summary.remaining_cash, 180.0);
     }
@@ -1177,12 +1168,13 @@ mod tests {
         assert_eq!(result.intents.len(), 5);
         assert!(result.intents.iter().all(|intent| intent.lot_quantity == 1));
         assert_eq!(result.allocation_summary.total_lots, 5);
+        assert_eq!(result.allocation_summary.existing_exposure_cash, 0.0);
         assert_eq!(result.allocation_summary.allocated_cash, 9_900.0);
         assert_eq!(result.allocation_summary.remaining_cash, 100.0);
     }
 
     #[test]
-    fn allocation_stops_when_not_enough_symbols_can_cover_budget_under_cap() {
+    fn allocation_keeps_valid_subset_when_budget_cannot_fill_under_cap() {
         let result = build_order_intents(
             &AccountState {
                 account: "DU123".to_string(),
@@ -1208,20 +1200,24 @@ mod tests {
             },
         );
 
-        assert!(result.intents.is_empty());
+        assert_eq!(result.intents.len(), 4);
+        assert!(result.intents.iter().all(|intent| intent.lot_quantity == 1));
+        assert_eq!(result.allocation_summary.total_lots, 4);
+        assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 2_080.0);
         assert!(
             result
                 .rejections
                 .iter()
-                .any(|rejection| { rejection.reason.contains("refusing partial deployment") })
+                .any(|rejection| { rejection.reason.contains("proceeding with the valid subset") })
         );
     }
 
     #[test]
-    fn existing_positions_reduce_remaining_distribution_budget_across_runs() {
+    fn existing_positions_do_not_reduce_new_trade_deployment_budget() {
         let positions = vec![InventoryPosition {
             account: "DU123".to_string(),
-            symbol: "AAPL".to_string(),
+            symbol: "ORCL".to_string(),
             security_type: "STK".to_string(),
             quantity: 100.0,
             average_cost: 19.8,
@@ -1255,10 +1251,71 @@ mod tests {
             },
         );
 
-        assert!(result.rejections.is_empty());
         assert_eq!(result.intents.len(), 4);
+        assert!(result.intents.iter().all(|intent| intent.lot_quantity == 1));
+        assert_eq!(result.allocation_summary.existing_exposure_cash, 1_980.0);
+        assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 1_980.0);
+        assert!(result.rejections.iter().any(|rejection| {
+            rejection.reason.contains("proceeding with the valid subset")
+        }));
+    }
+
+    #[test]
+    fn oversized_existing_symbol_does_not_zero_out_budget_for_other_symbols() {
+        let positions = vec![InventoryPosition {
+            account: "DU123".to_string(),
+            symbol: "ORCL".to_string(),
+            security_type: "STK".to_string(),
+            quantity: 100.0,
+            average_cost: 90.0,
+            expiry: None,
+            strike: None,
+            right: None,
+        }];
+
+        let result = build_order_intents(
+            &AccountState {
+                account: "DU123".to_string(),
+                available_funds: Some(50_000.0),
+                buying_power: Some(50_000.0),
+                net_liquidation: Some(75_000.0),
+            },
+            &positions,
+            &[
+                spread_candidate("ORCL"),
+                spread_candidate("MSFT"),
+                spread_candidate("NVDA"),
+                spread_candidate("AMD"),
+                spread_candidate("META"),
+                spread_candidate("TSLA"),
+            ],
+            &AppConfig {
+                risk: RiskConfig {
+                    max_open_positions: 6,
+                    ..test_config().risk
+                },
+                allocation: AllocationConfig {
+                    deployment_budget: 10_000.0,
+                    max_cash_per_symbol_pct: 20.0,
+                    min_cash_reserve_pct: 0.0,
+                    ..AllocationConfig::default()
+                },
+                ..test_config()
+            },
+        );
+
+        assert_eq!(result.intents.len(), 5);
+        assert!(result.intents.iter().all(|intent| intent.symbol != "ORCL"));
+        assert!(result.rejections.iter().any(|rejection| {
+            rejection.symbol == "ORCL"
+                && rejection
+                    .reason
+                    .contains("existing brokerage exposure 9000.00")
+        }));
+        assert_eq!(result.allocation_summary.existing_exposure_cash, 9_000.0);
         assert_eq!(result.allocation_summary.allocated_cash, 9_900.0);
-        assert_eq!(result.allocation_summary.remaining_cash, 0.0);
+        assert_eq!(result.allocation_summary.remaining_cash, 100.0);
     }
 
     #[test]

@@ -12,11 +12,11 @@ scan_schedule = "0 45 9,12,15 * * MON-FRI"
 market_data_mode = "live"
 
 [universe]
-tickers_file = "docs/50_stocks_list.csv"
+tickers_file = "docs/nasdaqlisted_symbols_sorted.csv"
 # tickers = ["AAPL", "MSFT"]
 
 [strategy]
-expiration_dates = ["20260501"]
+expiration_dates = ["20260508"]
 min_underlying_price = 1.0
 max_underlying_price = 20.0
 min_profit_dollars_per_share = 0.05
@@ -30,17 +30,17 @@ max_option_spread_pct = 0.25
 default_beta = 1.5
 
 [allocation]
-deployment_budget = 10000.0
+deployment_budget = 20000.0
 capital_source = "available_funds"
-max_distribution_per_symbol_pct = 20.0
+max_distribution_per_symbol_pct = 10.0
 min_cash_reserve_pct = 5.0
-max_new_trades_per_cycle = 5
-max_open_positions = 5
+max_new_trades_per_cycle = 25
+max_open_positions = 50
 
 [performance]
-symbol_concurrency = 4
-option_quote_concurrency_per_symbol = 2
-max_underlyings_per_cycle = 50
+symbol_concurrency = 6
+option_quote_concurrency_per_symbol = 3
+max_underlyings_per_cycle = 2500
 max_option_quotes_per_underlying = 3
 
 [execution]

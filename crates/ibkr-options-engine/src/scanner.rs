@@ -305,6 +305,7 @@ where
         candidate_symbols_considered,
         selected_symbols,
         total_lots,
+        existing_exposure_cash,
         allocated_cash,
         remaining_cash,
     } = intent_build.allocation_summary;
@@ -313,7 +314,7 @@ where
     guardrail_rejections.extend(intent_build.rejections);
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
     action_log.push(format!(
-        "Capital allocation: configured_source={} | preview {}={:?} deployable {:.2} | routed {}={:?} deployable {:.2} | per-symbol distribution cap {:.2} | selected {} symbol(s) / {} lot(s) across {} collapsed candidate symbol(s) | allocated {:.2} | remaining {:.2}.",
+        "Capital allocation: configured_source={} | preview {}={:?} deployable {:.2} | routed {}={:?} deployable {:.2} | per-symbol distribution cap {:.2} | selected {} symbol(s) / {} lot(s) across {} collapsed candidate symbol(s) | existing exposure {:.2} | newly allocated {:.2} | remaining {:.2}.",
         configured_source,
         preview.source,
         preview.reported_amount,
@@ -329,6 +330,7 @@ where
         selected_symbols,
         total_lots,
         candidate_symbols_considered,
+        existing_exposure_cash,
         allocated_cash,
         remaining_cash
     ));
@@ -472,6 +474,7 @@ where
             candidate_symbols_considered,
             selected_symbols,
             total_lots,
+            existing_exposure_cash,
             allocated_cash,
             remaining_cash,
         },
