@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use dotenvy::dotenv;
 use ibapi::{
     contracts::{ComboLeg, ComboLegOpenClose},
-    orders::{Action, OrderStatus, PlaceOrder, TagValue, TimeInForce, order_builder},
+    orders::{Action, OrderStatus, PlaceOrder, TimeInForce, order_builder},
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
 use ibkr_options_engine::{
@@ -25,7 +25,9 @@ use ibkr_options_engine::{
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
 
-const COMBO_PAYOUT_ADVANCED_OVERRIDE: &str = "8229,COMBOPAYOUT";
+const COMBO_PAYOUT_ADVANCED_OVERRIDE: &str = "COMBOPAYOUT";
+const CLOSE_BAG_MARKET_CREDIT_FRACTION: f64 = 0.50;
+const CLOSE_BAG_MIN_COLLECTION_WINDOW_SECS: u64 = 10;
 const CLOSE_BAG_REPRICE_CONCESSION_PER_ATTEMPT: f64 = 0.05;
 const MIN_CLOSE_BAG_LIMIT_CREDIT: f64 = 0.01;
 
@@ -426,15 +428,22 @@ async fn build_close_bag_plan(
                 open_position.symbol
             )
         })?;
-    let estimated_limit_credit = round_to_cents(stock_exit_price - option_cover_price);
-    if estimated_limit_credit <= 0.0 {
+    let derived_market_credit = round_to_cents(stock_exit_price - option_cover_price);
+    if derived_market_credit <= 0.0 {
         anyhow::bail!(
             "derived combo credit is non-positive for {}: stock_exit_price={stock_exit_price:.2}, option_cover_price={option_cover_price:.2}",
             open_position.symbol
         );
     }
+    let estimated_limit_credit = round_to_cents(
+        (derived_market_credit * CLOSE_BAG_MARKET_CREDIT_FRACTION).max(MIN_CLOSE_BAG_LIMIT_CREDIT),
+    );
 
     let mut notes = Vec::new();
+    notes.push(format!(
+        "close limit credit set to {:.0}% of derived market credit ({estimated_limit_credit:.2} from {derived_market_credit:.2})",
+        CLOSE_BAG_MARKET_CREDIT_FRACTION * 100.0
+    ));
     if underlying.price_source.contains("delayed") {
         notes.push(format!(
             "underlying snapshot appears non-live ({})",
@@ -517,11 +526,8 @@ async fn submit_close_bag_order(
             .await
             .with_context(|| format!("failed to place BAG closeout order for {}", plan.symbol))?;
         let started = Instant::now();
-        let collection_window = if attempt < max_reprices {
-            Duration::from_secs(3).min(reprice_wait)
-        } else {
-            Duration::from_secs(3)
-        };
+        let collection_window =
+            Duration::from_secs(CLOSE_BAG_MIN_COLLECTION_WINDOW_SECS).max(reprice_wait);
         let idle_timeout = Duration::from_secs(1);
         let mut retry_override = None;
         let mut latest_status = None;
@@ -547,7 +553,8 @@ async fn submit_close_bag_order(
                     }
                     _ => {}
                 },
-                Ok(None) | Err(_) => break,
+                Ok(None) => break,
+                Err(_) => continue,
             }
         }
 
@@ -587,7 +594,7 @@ fn build_close_bag_order(
     limit_credit: f64,
 ) -> ibapi::orders::Order {
     let mut order =
-        order_builder::combo_limit_order(Action::Sell, plan.lots as f64, limit_credit, false);
+        order_builder::combo_limit_order(Action::Sell, plan.lots as f64, limit_credit, true);
     order.account = account.to_string();
     order.order_type = "LMT".to_string();
     order.limit_price = Some(limit_credit);
@@ -595,10 +602,6 @@ fn build_close_bag_order(
     order.transmit = true;
     order.outside_rth = false;
     order.order_ref = format!("deepitm-buywrite:{}:combo:close", plan.symbol);
-    order.smart_combo_routing_params = vec![TagValue {
-        tag: "NonGuaranteed".to_string(),
-        value: "0".to_string(),
-    }];
     // IBKR marks covered-call unwind BAGs as payout combos and rejects them unless
     // we explicitly accept the advanced combo warning that TWS exposes as a checkbox.
     order.advanced_error_override = COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string();
@@ -619,14 +622,31 @@ fn extract_advanced_error_override(message: &str) -> Option<String> {
 }
 
 fn normalize_advanced_error_override(raw: &str) -> Option<String> {
-    let normalized = raw
-        .trim()
-        .replace('=', ",")
+    let trimmed = raw.trim();
+    let candidate = if let Some((tag, values)) = trimmed.split_once('=') {
+        if tag.trim().chars().all(|ch| ch.is_ascii_digit()) {
+            values
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    let mut parts = candidate
         .split(',')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect::<Vec<_>>();
+
+    if parts
+        .first()
+        .is_some_and(|segment| segment.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        parts.remove(0);
+    }
+
+    let normalized = parts.join(",");
 
     if normalized.is_empty() {
         None
@@ -786,6 +806,10 @@ mod tests {
             normalize_advanced_error_override(" 8229 , COMBOPAYOUT "),
             Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string())
         );
+        assert_eq!(
+            normalize_advanced_error_override("COMBOPAYOUT"),
+            Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string())
+        );
     }
 
     #[test]
@@ -864,6 +888,6 @@ mod tests {
         );
         assert_eq!(order.smart_combo_routing_params.len(), 1);
         assert_eq!(order.smart_combo_routing_params[0].tag, "NonGuaranteed");
-        assert_eq!(order.smart_combo_routing_params[0].value, "0");
+        assert_eq!(order.smart_combo_routing_params[0].value, "1");
     }
 }

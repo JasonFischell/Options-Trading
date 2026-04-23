@@ -7,7 +7,7 @@ use ibapi::{
     contracts::{ComboLeg, ComboLegOpenClose},
     orders::{
         Action, CommissionReport, ExecutionData, Order, OrderData, OrderStatus, PlaceOrder,
-        TagValue, TimeInForce, order_builder,
+        TimeInForce, order_builder,
     },
     prelude::{Client, Contract, Currency, Exchange, SecurityType, Symbol},
 };
@@ -859,7 +859,7 @@ fn build_ibkr_combo_order_at_limit(
         Action::Buy,
         intent.lot_quantity as f64,
         limit_price,
-        false,
+        true,
     );
     order.account = intent.account.clone();
     order.order_type = "LMT".to_string();
@@ -868,10 +868,6 @@ fn build_ibkr_combo_order_at_limit(
     order.transmit = true;
     order.outside_rth = false;
     order.order_ref = format!("deepitm-buywrite:{}:combo:buywrite", intent.symbol);
-    order.smart_combo_routing_params = vec![TagValue {
-        tag: "NonGuaranteed".to_string(),
-        value: "0".to_string(),
-    }];
     Ok(order)
 }
 
@@ -1349,7 +1345,7 @@ mod tests {
             combo_order.smart_combo_routing_params[0].tag,
             "NonGuaranteed"
         );
-        assert_eq!(combo_order.smart_combo_routing_params[0].value, "0");
+        assert_eq!(combo_order.smart_combo_routing_params[0].value, "1");
     }
 
     #[test]
