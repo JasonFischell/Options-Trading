@@ -127,6 +127,7 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         buying_power: None,
         net_liquidation: None,
     };
+    let mut cash_available_funds = None;
     let mut fallback_available_funds = None;
     let mut diagnostics = AccountMetricDiagnostics::default();
 
@@ -134,6 +135,7 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         client,
         account,
         &mut state,
+        &mut cash_available_funds,
         &mut fallback_available_funds,
         &mut diagnostics,
     )
@@ -144,13 +146,16 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
             client,
             account,
             &mut state,
+            &mut cash_available_funds,
             &mut fallback_available_funds,
             &mut diagnostics,
         )
         .await?;
     }
 
-    if state.available_funds.is_none() {
+    if cash_available_funds.is_some() {
+        state.available_funds = cash_available_funds;
+    } else if state.available_funds.is_none() {
         state.available_funds = fallback_available_funds;
     }
 
@@ -184,11 +189,13 @@ async fn populate_account_state_from_summary(
     client: &Client,
     account: &str,
     state: &mut AccountState,
+    cash_available_funds: &mut Option<f64>,
     fallback_available_funds: &mut Option<f64>,
     diagnostics: &mut AccountMetricDiagnostics,
 ) -> Result<()> {
     let tags = &[
         AccountSummaryTags::NET_LIQUIDATION,
+        ACCOUNT_SUMMARY_TAG_TOTAL_CASH_VALUE,
         AccountSummaryTags::AVAILABLE_FUNDS,
         AccountSummaryTags::FULL_AVAILABLE_FUNDS,
         AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS,
@@ -216,6 +223,7 @@ async fn populate_account_state_from_summary(
 
                 apply_account_metric(
                     state,
+                    cash_available_funds,
                     fallback_available_funds,
                     &summary.tag,
                     summary.value.parse::<f64>().ok(),
@@ -232,6 +240,7 @@ async fn populate_account_state_from_updates(
     client: &Client,
     account: &str,
     state: &mut AccountState,
+    cash_available_funds: &mut Option<f64>,
     fallback_available_funds: &mut Option<f64>,
     diagnostics: &mut AccountMetricDiagnostics,
 ) -> Result<()> {
@@ -268,6 +277,7 @@ async fn populate_account_state_from_updates(
 
                 apply_account_metric(
                     state,
+                    cash_available_funds,
                     fallback_available_funds,
                     &value.key,
                     value.value.parse::<f64>().ok(),
@@ -283,11 +293,15 @@ async fn populate_account_state_from_updates(
 
 fn apply_account_metric(
     state: &mut AccountState,
+    cash_available_funds: &mut Option<f64>,
     fallback_available_funds: &mut Option<f64>,
     key: &str,
     parsed_value: Option<f64>,
 ) {
     match canonical_account_metric_key(key) {
+        Some(ACCOUNT_SUMMARY_TAG_TOTAL_CASH_VALUE) => {
+            *cash_available_funds = parsed_value;
+        }
         Some(AccountSummaryTags::AVAILABLE_FUNDS) => state.available_funds = parsed_value,
         Some(AccountSummaryTags::FULL_AVAILABLE_FUNDS)
         | Some(AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS) => {
@@ -303,6 +317,7 @@ fn apply_account_metric(
 
 fn canonical_account_metric_key(key: &str) -> Option<&'static str> {
     for candidate in [
+        ACCOUNT_SUMMARY_TAG_TOTAL_CASH_VALUE,
         AccountSummaryTags::AVAILABLE_FUNDS,
         AccountSummaryTags::FULL_AVAILABLE_FUNDS,
         AccountSummaryTags::LOOK_AHEAD_AVAILABLE_FUNDS,
@@ -316,6 +331,8 @@ fn canonical_account_metric_key(key: &str) -> Option<&'static str> {
 
     None
 }
+
+const ACCOUNT_SUMMARY_TAG_TOTAL_CASH_VALUE: &str = "TotalCashValue";
 
 fn has_any_account_metric(state: &AccountState) -> bool {
     state.available_funds.is_some()
@@ -1532,6 +1549,10 @@ mod tests {
 
     #[test]
     fn canonical_account_metric_key_accepts_segment_suffixes() {
+        assert_eq!(
+            canonical_account_metric_key("TotalCashValue-S"),
+            Some(super::ACCOUNT_SUMMARY_TAG_TOTAL_CASH_VALUE)
+        );
         assert_eq!(
             canonical_account_metric_key("AvailableFunds-S"),
             Some(AccountSummaryTags::AVAILABLE_FUNDS)
