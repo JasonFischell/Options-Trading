@@ -22,8 +22,10 @@ use ibkr_options_engine::{
     paper_state::PaperTradeLedger,
     state::summarize_open_positions,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
+
+const COMBO_PAYOUT_ADVANCED_OVERRIDE: &str = "8229,COMBOPAYOUT";
 
 #[derive(Debug, Parser)]
 #[command(name = "ibkr-account-ops")]
@@ -464,7 +466,6 @@ async fn submit_close_bag_order(
     config: &AppConfig,
     plan: &CloseBagPlan,
 ) -> Result<i32> {
-    let order_id = client.next_order_id();
     let contract = Contract {
         symbol: Symbol::from(plan.symbol.as_str()),
         security_type: SecurityType::Spread,
@@ -491,31 +492,55 @@ async fn submit_close_bag_order(
         ..Default::default()
     };
 
-    let order = build_close_bag_order(plan, &config.account);
+    let mut advanced_error_override = Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string());
 
-    let mut subscription = client
-        .place_order(order_id, &contract, &order)
-        .await
-        .with_context(|| format!("failed to place BAG closeout order for {}", plan.symbol))?;
-    let started = Instant::now();
-    let collection_window = Duration::from_secs(3);
-    let idle_timeout = Duration::from_secs(1);
-
-    while started.elapsed() < collection_window {
-        match timeout(idle_timeout, subscription.next()).await {
-            Ok(Some(result)) => match result? {
-                PlaceOrder::OrderStatus(OrderStatus { status, .. })
-                    if is_terminal_order_status(&status) =>
-                {
-                    break;
-                }
-                _ => {}
-            },
-            Ok(None) | Err(_) => break,
+    for attempt in 0..2 {
+        let order_id = client.next_order_id();
+        let mut order = build_close_bag_order(plan, &config.account);
+        if let Some(override_value) = &advanced_error_override {
+            order.advanced_error_override = override_value.clone();
         }
+
+        let mut subscription = client
+            .place_order(order_id, &contract, &order)
+            .await
+            .with_context(|| format!("failed to place BAG closeout order for {}", plan.symbol))?;
+        let started = Instant::now();
+        let collection_window = Duration::from_secs(3);
+        let idle_timeout = Duration::from_secs(1);
+        let mut retry_override = None;
+
+        while started.elapsed() < collection_window {
+            match timeout(idle_timeout, subscription.next()).await {
+                Ok(Some(result)) => match result? {
+                    PlaceOrder::OrderStatus(OrderStatus { status, .. })
+                        if is_terminal_order_status(&status) =>
+                    {
+                        break;
+                    }
+                    PlaceOrder::Message(notice) if notice.code == 201 => {
+                        retry_override = extract_advanced_error_override(&notice.message).filter(
+                            |override_value| override_value != &order.advanced_error_override,
+                        );
+                        break;
+                    }
+                    _ => {}
+                },
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        if let Some(override_value) = retry_override {
+            advanced_error_override = Some(override_value);
+            if attempt == 0 {
+                continue;
+            }
+        }
+
+        return Ok(order_id);
     }
 
-    Ok(order_id)
+    unreachable!("close BAG submission attempts are bounded")
 }
 
 fn build_close_bag_order(plan: &CloseBagPlan, account: &str) -> ibapi::orders::Order {
@@ -538,8 +563,38 @@ fn build_close_bag_order(plan: &CloseBagPlan, account: &str) -> ibapi::orders::O
     }];
     // IBKR marks covered-call unwind BAGs as payout combos and rejects them unless
     // we explicitly accept the advanced combo warning that TWS exposes as a checkbox.
-    order.advanced_error_override = "8229=COMBOPAYOUT".to_string();
+    order.advanced_error_override = COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string();
     order
+}
+
+fn extract_advanced_error_override(message: &str) -> Option<String> {
+    let json_start = message.find('{')?;
+    let payload = serde_json::from_str::<AdvancedRejectPayload>(&message[json_start..]).ok()?;
+
+    payload
+        .rejects
+        .into_iter()
+        .flat_map(|reject| reject.buttons)
+        .flat_map(|button| button.options)
+        .filter_map(|option| normalize_advanced_error_override(&option.fixstr))
+        .next()
+}
+
+fn normalize_advanced_error_override(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .replace('=', ",")
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 fn is_terminal_order_status(status: &str) -> bool {
@@ -561,11 +616,32 @@ fn round_to_cents(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+#[derive(Debug, Deserialize)]
+struct AdvancedRejectPayload {
+    rejects: Vec<AdvancedRejectEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedRejectEntry {
+    buttons: Vec<AdvancedRejectButton>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedRejectButton {
+    options: Vec<AdvancedRejectOption>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedRejectOption {
+    fixstr: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseBagPlan, build_close_bag_order, completed_order_is_filled, normalize_symbols,
-        normalized_order_bucket,
+        COMBO_PAYOUT_ADVANCED_OVERRIDE, CloseBagPlan, build_close_bag_order,
+        completed_order_is_filled, extract_advanced_error_override,
+        normalize_advanced_error_override, normalize_symbols, normalized_order_bucket,
     };
     use ibkr_options_engine::models::BrokerCompletedOrder;
 
@@ -613,6 +689,33 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_advanced_override_fixstr() {
+        assert_eq!(
+            normalize_advanced_error_override("8229=COMBOPAYOUT"),
+            Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string())
+        );
+        assert_eq!(
+            normalize_advanced_error_override(" 8229 , COMBOPAYOUT "),
+            Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_advanced_override_from_reject_payload() {
+        let message = concat!(
+            "Order rejected - reason:Riskless combination orders are not allowed.;",
+            "{\"rejects\":[{\"buttons\":[{\"options\":[{\"fixstr\":\"8229=COMBOPAYOUT\",",
+            "\"text\":\"Transmit anyway.\"}],\"style\":\"chk\"}],\"id\":2,",
+            "\"text\":\"Riskless combination orders are not allowed.\"}],\"version\":\"1.0\"}"
+        );
+
+        assert_eq!(
+            extract_advanced_error_override(message),
+            Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string())
+        );
+    }
+
+    #[test]
     fn close_bag_orders_include_combo_payout_override() {
         let plan = CloseBagPlan {
             symbol: "SERV".to_string(),
@@ -636,7 +739,10 @@ mod tests {
         assert_eq!(order.account, "DUQ212633");
         assert_eq!(order.order_ref, "deepitm-buywrite:SERV:combo:close");
         assert_eq!(order.limit_price, Some(8.03));
-        assert_eq!(order.advanced_error_override, "8229=COMBOPAYOUT");
+        assert_eq!(
+            order.advanced_error_override,
+            COMBO_PAYOUT_ADVANCED_OVERRIDE
+        );
         assert_eq!(order.smart_combo_routing_params.len(), 1);
         assert_eq!(order.smart_combo_routing_params[0].tag, "NonGuaranteed");
         assert_eq!(order.smart_combo_routing_params[0].value, "0");
