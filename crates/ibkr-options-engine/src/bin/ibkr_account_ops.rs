@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
 
 const COMBO_PAYOUT_ADVANCED_OVERRIDE: &str = "8229,COMBOPAYOUT";
+const CLOSE_BAG_REPRICE_CONCESSION_PER_ATTEMPT: f64 = 0.05;
+const MIN_CLOSE_BAG_LIMIT_CREDIT: f64 = 0.01;
 
 #[derive(Debug, Parser)]
 #[command(name = "ibkr-account-ops")]
@@ -492,11 +494,20 @@ async fn submit_close_bag_order(
         ..Default::default()
     };
 
+    let max_reprices = if config.execution.auto_reprice {
+        config.execution.reprice_attempts
+    } else {
+        0
+    };
+    let reprice_wait = Duration::from_secs(config.execution.reprice_wait_seconds.max(1));
+    let initial_limit_credit = plan.estimated_limit_credit;
+    let min_limit_credit = derive_min_close_bag_limit_credit(initial_limit_credit, max_reprices);
+    let mut current_limit_credit = initial_limit_credit;
     let mut advanced_error_override = Some(COMBO_PAYOUT_ADVANCED_OVERRIDE.to_string());
 
-    for attempt in 0..2 {
+    for attempt in 0..=max_reprices {
         let order_id = client.next_order_id();
-        let mut order = build_close_bag_order(plan, &config.account);
+        let mut order = build_close_bag_order(plan, &config.account, current_limit_credit);
         if let Some(override_value) = &advanced_error_override {
             order.advanced_error_override = override_value.clone();
         }
@@ -506,17 +517,27 @@ async fn submit_close_bag_order(
             .await
             .with_context(|| format!("failed to place BAG closeout order for {}", plan.symbol))?;
         let started = Instant::now();
-        let collection_window = Duration::from_secs(3);
+        let collection_window = if attempt < max_reprices {
+            Duration::from_secs(3).min(reprice_wait)
+        } else {
+            Duration::from_secs(3)
+        };
         let idle_timeout = Duration::from_secs(1);
         let mut retry_override = None;
+        let mut latest_status = None;
+        let mut saw_fill = false;
 
         while started.elapsed() < collection_window {
             match timeout(idle_timeout, subscription.next()).await {
                 Ok(Some(result)) => match result? {
-                    PlaceOrder::OrderStatus(OrderStatus { status, .. })
-                        if is_terminal_order_status(&status) =>
-                    {
-                        break;
+                    PlaceOrder::OrderStatus(OrderStatus { status, filled, .. }) => {
+                        latest_status = Some(status.clone());
+                        if filled > 0.0 {
+                            saw_fill = true;
+                        }
+                        if is_terminal_order_status(&status) {
+                            break;
+                        }
                     }
                     PlaceOrder::Message(notice) if notice.code == 201 => {
                         retry_override = extract_advanced_error_override(&notice.message).filter(
@@ -532,9 +553,26 @@ async fn submit_close_bag_order(
 
         if let Some(override_value) = retry_override {
             advanced_error_override = Some(override_value);
-            if attempt == 0 {
+            if attempt < max_reprices {
                 continue;
             }
+        }
+
+        if should_auto_reprice_close_bag_order(
+            latest_status.as_deref(),
+            saw_fill,
+            current_limit_credit,
+            min_limit_credit,
+        ) && attempt < max_reprices
+        {
+            cancel_open_order(client, order_id).await?;
+            current_limit_credit = next_close_bag_limit_credit(
+                initial_limit_credit,
+                min_limit_credit,
+                attempt + 1,
+                max_reprices,
+            );
+            continue;
         }
 
         return Ok(order_id);
@@ -543,16 +581,16 @@ async fn submit_close_bag_order(
     unreachable!("close BAG submission attempts are bounded")
 }
 
-fn build_close_bag_order(plan: &CloseBagPlan, account: &str) -> ibapi::orders::Order {
-    let mut order = order_builder::combo_limit_order(
-        Action::Sell,
-        plan.lots as f64,
-        plan.estimated_limit_credit,
-        false,
-    );
+fn build_close_bag_order(
+    plan: &CloseBagPlan,
+    account: &str,
+    limit_credit: f64,
+) -> ibapi::orders::Order {
+    let mut order =
+        order_builder::combo_limit_order(Action::Sell, plan.lots as f64, limit_credit, false);
     order.account = account.to_string();
     order.order_type = "LMT".to_string();
-    order.limit_price = Some(plan.estimated_limit_credit);
+    order.limit_price = Some(limit_credit);
     order.tif = TimeInForce::Day;
     order.transmit = true;
     order.outside_rth = false;
@@ -595,6 +633,54 @@ fn normalize_advanced_error_override(raw: &str) -> Option<String> {
     } else {
         Some(normalized)
     }
+}
+
+fn derive_min_close_bag_limit_credit(initial_limit_credit: f64, max_reprices: usize) -> f64 {
+    if max_reprices == 0 {
+        return initial_limit_credit.max(MIN_CLOSE_BAG_LIMIT_CREDIT);
+    }
+
+    round_to_cents(
+        (initial_limit_credit - (CLOSE_BAG_REPRICE_CONCESSION_PER_ATTEMPT * max_reprices as f64))
+            .max(MIN_CLOSE_BAG_LIMIT_CREDIT),
+    )
+}
+
+fn next_close_bag_limit_credit(
+    initial_limit_credit: f64,
+    min_limit_credit: f64,
+    attempt_number: usize,
+    max_reprices: usize,
+) -> f64 {
+    if max_reprices == 0 || min_limit_credit >= initial_limit_credit {
+        return initial_limit_credit;
+    }
+
+    let progress = attempt_number as f64 / max_reprices as f64;
+    round_to_cents(
+        (initial_limit_credit - ((initial_limit_credit - min_limit_credit) * progress))
+            .max(min_limit_credit),
+    )
+}
+
+fn should_auto_reprice_close_bag_order(
+    latest_status: Option<&str>,
+    saw_fill: bool,
+    current_limit_credit: f64,
+    min_limit_credit: f64,
+) -> bool {
+    if saw_fill || current_limit_credit <= min_limit_credit {
+        return false;
+    }
+
+    latest_status
+        .map(|status| {
+            matches!(
+                status.trim().to_ascii_lowercase().as_str(),
+                "submitted" | "presubmitted" | "pendingsubmit" | "pending submit"
+            )
+        })
+        .unwrap_or(true)
 }
 
 fn is_terminal_order_status(status: &str) -> bool {
@@ -640,8 +726,10 @@ struct AdvancedRejectOption {
 mod tests {
     use super::{
         COMBO_PAYOUT_ADVANCED_OVERRIDE, CloseBagPlan, build_close_bag_order,
-        completed_order_is_filled, extract_advanced_error_override,
+        completed_order_is_filled, derive_min_close_bag_limit_credit,
+        extract_advanced_error_override, next_close_bag_limit_credit,
         normalize_advanced_error_override, normalize_symbols, normalized_order_bucket,
+        should_auto_reprice_close_bag_order,
     };
     use ibkr_options_engine::models::BrokerCompletedOrder;
 
@@ -716,6 +804,37 @@ mod tests {
     }
 
     #[test]
+    fn derives_descending_close_bag_reprice_path() {
+        let min_credit = derive_min_close_bag_limit_credit(8.03, 3);
+        assert_eq!(min_credit, 7.88);
+        assert_eq!(next_close_bag_limit_credit(8.03, min_credit, 1, 3), 7.98);
+        assert_eq!(next_close_bag_limit_credit(8.03, min_credit, 2, 3), 7.93);
+        assert_eq!(next_close_bag_limit_credit(8.03, min_credit, 3, 3), 7.88);
+    }
+
+    #[test]
+    fn reprices_only_resting_unfilled_close_bag_orders() {
+        assert!(should_auto_reprice_close_bag_order(
+            Some("PreSubmitted"),
+            false,
+            8.03,
+            7.88
+        ));
+        assert!(!should_auto_reprice_close_bag_order(
+            Some("Filled"),
+            true,
+            8.03,
+            7.88
+        ));
+        assert!(!should_auto_reprice_close_bag_order(
+            Some("PreSubmitted"),
+            false,
+            7.88,
+            7.88
+        ));
+    }
+
+    #[test]
     fn close_bag_orders_include_combo_payout_override() {
         let plan = CloseBagPlan {
             symbol: "SERV".to_string(),
@@ -734,7 +853,7 @@ mod tests {
             notes: vec![],
         };
 
-        let order = build_close_bag_order(&plan, "DUQ212633");
+        let order = build_close_bag_order(&plan, "DUQ212633", 8.03);
 
         assert_eq!(order.account, "DUQ212633");
         assert_eq!(order.order_ref, "deepitm-buywrite:SERV:combo:close");
