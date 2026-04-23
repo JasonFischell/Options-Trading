@@ -898,6 +898,22 @@ pub fn is_invalid_option_contract_error(error: &anyhow::Error) -> bool {
     })
 }
 
+pub fn is_invalid_underlying_contract_error(error: &anyhow::Error) -> bool {
+    if error
+        .to_string()
+        .contains("no stock contract details returned")
+    {
+        return true;
+    }
+
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<IbkrError>(),
+            Some(IbkrError::Message(200, _))
+        )
+    })
+}
+
 pub async fn resolve_option_contract(
     client: &Client,
     selected: &SelectedOptionContract,

@@ -6,6 +6,7 @@ use std::{collections::BTreeSet, time::Instant};
 use crate::{
     config::AppConfig,
     execution::OrderExecutor,
+    ibkr::is_invalid_underlying_contract_error,
     market_data::{MarketDataProvider, load_universe},
     models::{
         AllocationSummary, CapitalSourceDetails, CycleReport, CycleThroughputCounters,
@@ -172,7 +173,18 @@ where
 
     for (_, record, snapshot_result) in snapshot_results {
         symbols_scanned += 1;
-        let Some(snapshot) = snapshot_result? else {
+        let snapshot = match snapshot_result {
+            Ok(snapshot) => snapshot,
+            Err(error) if is_invalid_underlying_contract_error(&error) => {
+                warnings.push(format!(
+                    "{} could not be resolved to an IBKR stock contract and was skipped: {}",
+                    record.symbol, error
+                ));
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(snapshot) = snapshot else {
             guardrail_rejections.push(GuardrailRejection {
                 symbol: record.symbol.clone(),
                 stage: "market-data".to_string(),
@@ -536,6 +548,7 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
+    use ibapi::Error as IbkrError;
 
     use crate::{
         config::{
@@ -558,6 +571,7 @@ mod tests {
         completed_orders: Mutex<Vec<BrokerCompletedOrder>>,
         cancelled_order_ids: Mutex<Vec<i32>>,
         symbols: HashMap<String, SymbolMarketSnapshot>,
+        symbol_errors: HashMap<String, String>,
         delays_ms: HashMap<String, u64>,
         prepare_calls: AtomicUsize,
         active_requests: AtomicUsize,
@@ -632,6 +646,22 @@ mod tests {
             update_max(&self.max_active_requests, active);
             if let Some(delay_ms) = self.delays_ms.get(&record.symbol).copied() {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            if let Some(error_kind) = self.symbol_errors.get(&record.symbol) {
+                self.active_requests.fetch_sub(1, Ordering::SeqCst);
+                return match error_kind.as_str() {
+                    "invalid-underlying" => Err(anyhow::Error::new(IbkrError::Message(
+                        200,
+                        "No security definition has been found for the request".to_string(),
+                    ))
+                    .context(format!(
+                        "failed to resolve underlying contract details for {}",
+                        record.symbol
+                    ))),
+                    other => Err(anyhow::anyhow!(
+                        "unexpected replay provider symbol error kind: {other}"
+                    )),
+                };
             }
             let snapshot = self.symbols.get(&record.symbol).cloned();
             self.active_requests.fetch_sub(1, Ordering::SeqCst);
@@ -727,6 +757,7 @@ mod tests {
             completed_orders: Mutex::new(Vec::new()),
             cancelled_order_ids: Mutex::new(Vec::new()),
             symbols,
+            symbol_errors: HashMap::new(),
             delays_ms: HashMap::new(),
             prepare_calls: AtomicUsize::new(0),
             active_requests: AtomicUsize::new(0),
@@ -933,6 +964,45 @@ mod tests {
         assert_eq!(report.throughput_counters.option_quotes_completed, 3);
         assert!(report.throughput_counters.symbols_per_second > 0.0);
         assert!(report.throughput_counters.option_quotes_per_second > 0.0);
+
+        clear_test_ledger_dir("DU123");
+    }
+
+    #[tokio::test]
+    async fn skips_invalid_underlying_symbols_without_aborting_scan_cycle() {
+        set_test_ledger_dir();
+        clear_test_ledger_dir("DU123");
+
+        let mut config = test_config();
+        config.symbols = vec!["AAPL".to_string(), "000430".to_string(), "MSFT".to_string()];
+
+        let mut symbols = HashMap::new();
+        symbols.insert("AAPL".to_string(), snapshot_for("AAPL", 100.0, 90.0));
+        symbols.insert("MSFT".to_string(), snapshot_for("MSFT", 101.0, 91.0));
+
+        let mut provider = replay_provider(symbols);
+        provider
+            .symbol_errors
+            .insert("000430".to_string(), "invalid-underlying".to_string());
+
+        let report = run_scan_cycle(&provider, &RecordingExecutor::default(), &config)
+            .await
+            .unwrap();
+
+        assert_eq!(report.symbols_scanned, 3);
+        assert_eq!(report.underlying_snapshots, 2);
+        assert_eq!(report.candidates_ranked, 2);
+        assert!(report.guardrail_rejections.iter().any(|rejection| {
+            rejection.symbol == "000430"
+                && rejection.stage == "market-data"
+                && rejection.reason == "no usable market data snapshot returned"
+        }));
+        assert!(
+            report
+                .action_log
+                .iter()
+                .any(|entry| entry.contains("000430: no market-data snapshot was returned by IBKR."))
+        );
 
         clear_test_ledger_dir("DU123");
     }
