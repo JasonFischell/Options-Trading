@@ -35,10 +35,10 @@ In IB Gateway:
 
 Before we add broker connectivity:
 
-1. Create a local TOML config such as `paper-trading.local.toml`
-2. Copy values from `ibkr-options-engine.example.toml`
+1. Create a local TOML config in `docs/local/`, such as `docs/local/paper-trading.local.toml`
+2. Copy values from `docs/local/ibkr-options-engine.example.toml` or `docs/local/ibkr-options-engine.paper-trading.toml`
 3. Fill in IBKR host, port, client ID, and account identifiers
-4. Use `.env` only for compatibility or temporary overrides
+4. Use `.env` only for compatibility or temporary local overrides
 
 Suggested settings to review in the TOML file:
 
@@ -85,11 +85,11 @@ My recommendation is Rust unless there is a strong team preference for the .NET 
 From the repository root:
 
 1. Open a new terminal after the Rust install so `cargo` and `rg` are on `PATH`
-2. Copy `ibkr-options-engine.example.toml` to `paper-trading.local.toml`
+2. Copy `docs/local/ibkr-options-engine.example.toml` to `docs/local/paper-trading.local.toml`
 3. Start IB Gateway in paper mode
 4. Run `cargo build`
-5. Run `cargo run -p ibkr-options-engine -- scan --config paper-trading.local.toml`
-6. Run `cargo run -p ibkr-options-engine -- status --config paper-trading.local.toml`
+5. Run `cargo run -p ibkr-options-engine -- scan --config docs/local/paper-trading.local.toml`
+6. Run `cargo run -p ibkr-options-engine -- status --config docs/local/paper-trading.local.toml`
 7. Set `connect_on_start = true` only when you want the app to test a real broker connection at startup
 8. Leave `enable_live_orders = false`; guarded buy-write submission is paper-only and routes as a combo BAG
 

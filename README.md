@@ -70,23 +70,24 @@ The engine currently supports:
 
 ## Running The Current Scanner
 
-The preferred workflow is TOML-backed CLI runs:
+The maintained workflow is TOML-backed CLI runs from `docs/local`:
 
-1. Copy `ibkr-options-engine.example.toml` to a local file such as `paper-trading.local.toml`
-2. Edit `paper-trading.local.toml` with your IBKR account, expirations, watchlist, budget, and execution flags
-3. Keep `platform = "gateway"` unless you intentionally want TWS
-4. For paper Gateway, use `port = 4002` unless your Gateway settings show a different API port
-5. Keep `tickers_file = "docs/50_stocks_list.csv"` unless you intentionally want a different CSV universe
-6. Keep `min_underlying_price = 1.0` and `max_underlying_price = 20.0` for the current sub-$20 watchlist
-7. Keep `read_only = true` and `enable_paper_orders = false` for early testing
-8. Set `connect_on_start = true` only when IB Gateway or TWS paper is already running
-9. In IB Gateway, enable `Configure > Settings > API > Settings > Enable ActiveX and Socket Clients`
-10. If localhost is restricted, add `127.0.0.1` to trusted IPs
-11. Run `cargo test -p ibkr-options-engine`
-12. Run `cargo run -p ibkr-options-engine -- scan --config paper-trading.local.toml`
-13. Run `cargo run -p ibkr-options-engine -- status --config paper-trading.local.toml`
+1. Start from `docs/local/ibkr-options-engine.example.toml` or `docs/local/ibkr-options-engine.paper-trading.toml`
+2. Copy the template to a personal file in `docs/local/` such as `docs/local/paper-trading.local.toml`
+3. Edit that local TOML with your IBKR account, expirations, watchlist, budget, and execution flags
+4. Keep `platform = "gateway"` unless you intentionally want TWS
+5. For paper Gateway, use `port = 4002` unless your Gateway settings show a different API port
+6. Keep `tickers_file = "docs/50_stocks_list.csv"` unless you intentionally want a different CSV universe
+7. Keep `min_underlying_price = 1.0` and `max_underlying_price = 20.0` for the current sub-$20 watchlist
+8. Keep `read_only = true` and `enable_paper_orders = false` for early testing
+9. Set `connect_on_start = true` only when IB Gateway or TWS paper is already running
+10. In IB Gateway, enable `Configure > Settings > API > Settings > Enable ActiveX and Socket Clients`
+11. If localhost is restricted, add `127.0.0.1` to trusted IPs
+12. Run `cargo test -p ibkr-options-engine`
+13. Run `cargo run -p ibkr-options-engine -- scan --config docs/local/paper-trading.local.toml`
+14. Run `cargo run -p ibkr-options-engine -- status --config docs/local/paper-trading.local.toml`
 
-Environment variables still work, and `.env.example` remains as a compatibility template, but the CLI `--config` flow is now the clearest path for repeatable paper runs.
+Environment variables still work, but `.env` should be treated as an optional local override only. The maintained setup path is the CLI `--config` flow with TOML templates under `docs/local/`.
 
 The current screening defaults mirror the Python reference more closely for deep-ITM calls, with explicit expiration-date selection available through `EXPIRATION_DATES=20260515` or a comma-separated list such as `EXPIRATION_DATES=20260515,20250620`. Ranking still increases with both annualized return and ITM depth, while scaling down higher-beta names.
 
@@ -98,6 +99,5 @@ For thin delayed/frozen option markets, the scanner now retries one model-price 
 
 - `AGENTS.md`: Codex workflow rules for this project
 - `Python Code/`: legacy baseline and input artifacts
-- `docs/`: setup docs, notes, and starter watchlist
+- `docs/`: setup docs, release notes, curated input lists, and local config templates
 - `crates/ibkr-options-engine/`: Rust scanner and execution engine
-- `.env.example`: local configuration template

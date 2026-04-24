@@ -314,11 +314,12 @@ impl AppConfig {
 fn default_config_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     [
-        "ibkr-options-engine.paper-trading.toml",
-        "ibkr-options-engine.toml",
+        cwd.join("docs").join("local").join("ibkr-options-engine.paper-trading.toml"),
+        cwd.join("docs").join("local").join("ibkr-options-engine.example.toml"),
+        cwd.join("ibkr-options-engine.paper-trading.toml"),
+        cwd.join("ibkr-options-engine.toml"),
     ]
     .into_iter()
-    .map(|name| cwd.join(name))
     .find(|path| path.is_file())
 }
 
@@ -1279,8 +1280,9 @@ max_distribution_per_symbol_pct = 15
 
         let original_dir = std::env::current_dir().unwrap();
         let test_dir = temp_test_dir("autodiscover");
-        std::fs::create_dir_all(&test_dir).unwrap();
-        let path = test_dir.join("ibkr-options-engine.paper-trading.toml");
+        let local_dir = test_dir.join("docs").join("local");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        let path = local_dir.join("ibkr-options-engine.paper-trading.toml");
         std::fs::write(
             &path,
             r#"
@@ -1316,7 +1318,7 @@ enable_paper_orders = true
 
         std::env::set_current_dir(&original_dir).unwrap();
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(test_dir).unwrap();
+        std::fs::remove_dir_all(test_dir).unwrap();
         clear_env();
     }
 
