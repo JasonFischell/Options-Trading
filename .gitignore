@@ -26,6 +26,7 @@ target-codex-*/
 secrets/
 *.local.toml
 crates/ibkr-options-engine/logs/ibkr-order-events-*.json
+*/docs/Trades_Executed*
 
 # OS / editors
 .DS_Store

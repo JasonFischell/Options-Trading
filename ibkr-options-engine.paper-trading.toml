@@ -16,9 +16,9 @@ tickers_file = "docs/nasdaqlisted_symbols_sorted.csv"
 # tickers = ["AAPL", "MSFT"]
 
 [strategy]
-expiration_dates = ["20260508"]
-min_underlying_price = 1.0
-max_underlying_price = 20.0
+expiration_dates = ["20260501"]
+min_underlying_price = 0.5
+max_underlying_price = 5.0
 min_profit_dollars_per_share = 0.05
 min_profit_pct_of_investment = 1.0
 min_profit_buffer_pct = 0.10
@@ -30,23 +30,23 @@ max_option_spread_pct = 0.25
 default_beta = 1.5
 
 [allocation]
-deployment_budget = 20000.0
+deployment_budget = 1500.0
 capital_source = "available_funds"
-max_distribution_per_symbol_pct = 10.0
-min_cash_reserve_pct = 5.0
+max_distribution_per_symbol_pct = 70.0
+min_cash_reserve_pct = 0.0
 max_new_trades_per_cycle = 25
 max_open_positions = 50
 
 [performance]
-symbol_concurrency = 6
-option_quote_concurrency_per_symbol = 3
-max_underlyings_per_cycle = 2500
-max_option_quotes_per_underlying = 3
+symbol_concurrency = 12
+option_quote_concurrency_per_symbol = 8
+max_underlyings_per_cycle = 1000
+max_option_quotes_per_underlying = 4
 
 [execution]
 enable_paper_orders = true
 enable_live_orders = false
 auto_reprice = true
-reprice_attempts = 3
-reprice_wait_seconds = 2
+reprice_attempts = 4
+reprice_wait_seconds = 4
 min_buying_power_buffer_pct = 5.0
