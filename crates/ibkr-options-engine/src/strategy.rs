@@ -43,16 +43,16 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    if let Some(spread_pct) = option.spread_pct()
-        && spread_pct > config.max_option_spread_pct
+    if let Some(spread_ratio) = option.spread_ratio()
+        && spread_ratio > config.max_option_spread_ratio
     {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "option spread {:.2}% exceeds maximum {:.2}%",
-                spread_pct * 100.0,
-                config.max_option_spread_pct * 100.0
+                spread_ratio * 100.0,
+                config.max_option_spread_ratio * 100.0
             ),
         });
     }
@@ -92,8 +92,8 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    let itm_depth_pct = (underlying_price - option.strike) / underlying_price;
-    if itm_depth_pct <= 0.0 {
+    let itm_depth_ratio = (underlying_price - option.strike) / underlying_price;
+    if itm_depth_ratio <= 0.0 {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
@@ -104,26 +104,26 @@ pub fn evaluate_buy_write_candidate(
         });
     }
 
-    if itm_depth_pct > config.max_itm_depth_pct {
+    if itm_depth_ratio > config.max_itm_depth_ratio {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "ITM depth {:.2}% exceeds configured maximum {:.2}%",
-                itm_depth_pct * 100.0,
-                config.max_itm_depth_pct * 100.0
+                itm_depth_ratio * 100.0,
+                config.max_itm_depth_ratio * 100.0
             ),
         });
     }
 
-    if itm_depth_pct < config.min_itm_depth_pct {
+    if itm_depth_ratio < config.min_itm_depth_ratio {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "ITM depth {:.2}% below configured minimum {:.2}%",
-                itm_depth_pct * 100.0,
-                config.min_itm_depth_pct * 100.0
+                itm_depth_ratio * 100.0,
+                config.min_itm_depth_ratio * 100.0
             ),
         });
     }
@@ -148,40 +148,42 @@ pub fn evaluate_buy_write_candidate(
             ),
         });
     }
-    let expiration_yield_pct = (expiration_profit / intrinsic_entry) * 100.0;
-    let annualized_yield_pct = expiration_yield_pct / (days_to_expiration as f64 / 365.0);
+    let expiration_yield_ratio = expiration_profit / intrinsic_entry;
+    let annualized_yield_ratio = expiration_yield_ratio / (days_to_expiration as f64 / 365.0);
 
-    if expiration_yield_pct < config.min_expiration_yield_pct {
+    if expiration_yield_ratio < config.min_expiration_yield_ratio {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "expiration yield {:.2}% below configured minimum {:.2}%",
-                expiration_yield_pct, config.min_expiration_yield_pct
+                expiration_yield_ratio * 100.0,
+                config.min_expiration_yield_ratio * 100.0
             ),
         });
     }
 
-    if annualized_yield_pct < config.min_annualized_yield_pct {
+    if annualized_yield_ratio < config.min_annualized_yield_ratio {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "annualized yield {:.2}% below configured minimum {:.2}%",
-                annualized_yield_pct, config.min_annualized_yield_pct
+                annualized_yield_ratio * 100.0,
+                config.min_annualized_yield_ratio * 100.0
             ),
         });
     }
 
-    let downside_buffer_pct = premium / underlying_price;
-    if downside_buffer_pct < config.min_downside_buffer_pct {
+    let downside_buffer_ratio = premium / underlying_price;
+    if downside_buffer_ratio < config.min_downside_buffer_ratio {
         return Err(GuardrailRejection {
             symbol: record.symbol.clone(),
             stage: "strategy".to_string(),
             reason: format!(
                 "downside buffer {:.2}% below configured minimum {:.2}%",
-                downside_buffer_pct * 100.0,
-                config.min_downside_buffer_pct * 100.0
+                downside_buffer_ratio * 100.0,
+                config.min_downside_buffer_ratio * 100.0
             ),
         });
     }
@@ -194,7 +196,7 @@ pub fn evaluate_buy_write_candidate(
         config.default_beta
     };
 
-    let score = (annualized_yield_pct / 100.0) * itm_depth_pct / beta.sqrt();
+    let score = annualized_yield_ratio * itm_depth_ratio / beta.sqrt();
 
     Ok(ScoredOptionCandidate {
         symbol: record.symbol.clone(),
@@ -213,11 +215,11 @@ pub fn evaluate_buy_write_candidate(
         option_bid: premium,
         option_ask: option.ask,
         delta: option.delta,
-        itm_depth_pct,
-        downside_buffer_pct,
+        itm_depth_ratio,
+        downside_buffer_ratio,
         expiration_profit_per_share: expiration_profit,
-        annualized_yield_pct,
-        expiration_yield_pct,
+        annualized_yield_ratio,
+        expiration_yield_ratio,
         score,
     })
 }
@@ -279,11 +281,11 @@ mod tests {
         };
         let config = StrategyConfig {
             expiration_dates: vec!["20991217".to_string()],
-            min_annualized_yield_pct: 0.01,
-            min_expiration_yield_pct: 0.01,
+            min_annualized_yield_ratio: 0.0001,
+            min_expiration_yield_ratio: 0.0001,
             min_expiration_profit_per_share: 0.01,
-            min_itm_depth_pct: 0.0,
-            min_downside_buffer_pct: 0.01,
+            min_itm_depth_ratio: 0.0,
+            min_downside_buffer_ratio: 0.01,
             ..StrategyConfig::default()
         };
 
@@ -291,8 +293,8 @@ mod tests {
             evaluate_buy_write_candidate(&record, &underlying, &option, &config).unwrap();
         assert_eq!(candidate.symbol, "AAPL");
         assert_eq!(candidate.exchange, "SMART");
-        assert!(candidate.annualized_yield_pct > 0.0);
-        assert!(candidate.itm_depth_pct > 0.0);
+        assert!(candidate.annualized_yield_ratio > 0.0);
+        assert!(candidate.itm_depth_ratio > 0.0);
         assert!(candidate.score > 0.0);
     }
 
@@ -337,11 +339,11 @@ mod tests {
         };
         let config = StrategyConfig {
             expiration_dates: vec!["20991217".to_string()],
-            min_annualized_yield_pct: 0.01,
-            min_expiration_yield_pct: 0.01,
+            min_annualized_yield_ratio: 0.0001,
+            min_expiration_yield_ratio: 0.0001,
             min_expiration_profit_per_share: 0.01,
-            min_itm_depth_pct: 0.0,
-            min_downside_buffer_pct: 0.01,
+            min_itm_depth_ratio: 0.0,
+            min_downside_buffer_ratio: 0.01,
             ..StrategyConfig::default()
         };
 
@@ -449,11 +451,11 @@ mod tests {
             &option,
             &StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_annualized_yield_pct: 0.01,
-                min_expiration_yield_pct: 0.01,
+                min_annualized_yield_ratio: 0.0001,
+                min_expiration_yield_ratio: 0.0001,
                 min_expiration_profit_per_share: 0.01,
-                min_itm_depth_pct: 0.05,
-                min_downside_buffer_pct: 0.01,
+                min_itm_depth_ratio: 0.05,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
         )
@@ -508,12 +510,12 @@ mod tests {
             &option,
             &StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_annualized_yield_pct: 0.01,
-                min_expiration_yield_pct: 0.01,
+                min_annualized_yield_ratio: 0.0001,
+                min_expiration_yield_ratio: 0.0001,
                 min_expiration_profit_per_share: 0.01,
-                min_itm_depth_pct: 0.0,
-                max_itm_depth_pct: 0.50,
-                min_downside_buffer_pct: 0.01,
+                min_itm_depth_ratio: 0.0,
+                max_itm_depth_ratio: 0.50,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
         )
@@ -570,11 +572,11 @@ mod tests {
             &option,
             &StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_annualized_yield_pct: 0.01,
-                min_expiration_yield_pct: 0.01,
+                min_annualized_yield_ratio: 0.0001,
+                min_expiration_yield_ratio: 0.0001,
                 min_expiration_profit_per_share: 0.05,
-                min_itm_depth_pct: 0.0,
-                min_downside_buffer_pct: 0.01,
+                min_itm_depth_ratio: 0.0,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
         )
@@ -629,11 +631,11 @@ mod tests {
             &option,
             &StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_annualized_yield_pct: 0.01,
-                min_expiration_yield_pct: 2.0,
+                min_annualized_yield_ratio: 0.0001,
+                min_expiration_yield_ratio: 0.02,
                 min_expiration_profit_per_share: 0.01,
-                min_itm_depth_pct: 0.0,
-                min_downside_buffer_pct: 0.01,
+                min_itm_depth_ratio: 0.0,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
         )
@@ -691,11 +693,11 @@ mod tests {
             &option,
             &StrategyConfig {
                 expiration_dates: vec![target_expiry.clone()],
-                min_annualized_yield_pct: 0.01,
-                min_expiration_yield_pct: 0.01,
+                min_annualized_yield_ratio: 0.0001,
+                min_expiration_yield_ratio: 0.0001,
                 min_expiration_profit_per_share: 0.01,
-                min_itm_depth_pct: 0.0,
-                min_downside_buffer_pct: 0.01,
+                min_itm_depth_ratio: 0.0,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
         )

@@ -429,8 +429,8 @@ fn render_candidates(candidates: &[ScoredOptionCandidate]) -> Vec<String> {
                 candidate.option_bid,
                 candidate.underlying_ask.unwrap_or(candidate.underlying_price) - candidate.option_bid,
                 candidate.expiration_profit_per_share,
-                candidate.annualized_yield_pct,
-                candidate.downside_buffer_pct
+                candidate.annualized_yield_ratio * 100.0,
+                candidate.downside_buffer_ratio * 100.0
             )
         })
         .collect()
@@ -489,7 +489,7 @@ fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
             report.capital_source_details.configured_source,
             preview.source,
             preview.reported_amount,
-            preview.reserve_pct,
+            preview.reserve_ratio * 100.0,
             preview.reserve_amount,
             preview.cash_after_reserve,
             preview.deployment_budget,
@@ -500,7 +500,7 @@ fn render_allocation_summary(report: &CycleReport) -> Vec<String> {
             "- Routed orders source={} reported={:?} reserve {:.2}% ({:.2}) | cash after reserve {:.2} | deployable {:.2} | per-symbol distribution cap {:.2}",
             routed.source,
             routed.reported_amount,
-            routed.reserve_pct,
+            routed.reserve_ratio * 100.0,
             routed.reserve_amount,
             routed.cash_after_reserve,
             routed.deployable_cash,
@@ -893,11 +893,11 @@ mod tests {
                 option_bid: 11.0,
                 option_ask: Some(11.2),
                 delta: Some(0.9),
-                itm_depth_pct: 10.0,
-                downside_buffer_pct: 12.0,
+                itm_depth_ratio: 0.10,
+                downside_buffer_ratio: 0.12,
                 expiration_profit_per_share: 0.75,
-                annualized_yield_pct: 15.0,
-                expiration_yield_pct: 1.2,
+                annualized_yield_ratio: 0.15,
+                expiration_yield_ratio: 0.012,
                 score: 2.5,
             }],
             guardrail_rejections: vec![GuardrailRejection {
@@ -1013,7 +1013,7 @@ mod tests {
                 preview: CapitalAllocationView {
                     source: "available_funds".to_string(),
                     reported_amount: Some(10_000.0),
-                    reserve_pct: 5.0,
+                    reserve_ratio: 0.05,
                     reserve_amount: 500.0,
                     cash_after_reserve: 9_500.0,
                     deployment_budget: 10_000.0,
@@ -1023,7 +1023,7 @@ mod tests {
                 routed_orders: CapitalAllocationView {
                     source: "available_funds".to_string(),
                     reported_amount: Some(10_000.0),
-                    reserve_pct: 5.0,
+                    reserve_ratio: 0.05,
                     reserve_amount: 500.0,
                     cash_after_reserve: 9_500.0,
                     deployment_budget: 10_000.0,

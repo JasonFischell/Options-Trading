@@ -22,8 +22,8 @@ This document records the first functional release snapshot of the Rust-first IB
 - `enable_paper_orders = true`
 - `enable_live_orders = false`
 - `capital_source = "available_funds"`
-- `min_cash_reserve_pct = 5.0`
-- `max_distribution_per_symbol_pct = 10.0`
+- `min_cash_reserve_ratio = 0.05`
+- `max_cash_per_symbol_ratio = 0.10`
 
 ## Verification Target
 

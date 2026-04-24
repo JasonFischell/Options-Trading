@@ -120,7 +120,7 @@ impl OptionQuoteSnapshot {
         }
     }
 
-    pub fn spread_pct(&self) -> Option<f64> {
+    pub fn spread_ratio(&self) -> Option<f64> {
         let bid = self.bid?;
         let ask = self.ask?;
         let midpoint = (bid + ask) / 2.0;
@@ -144,16 +144,6 @@ impl OptionQuoteSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OptionCandidate {
-    pub symbol: String,
-    pub strike: f64,
-    pub expiry: String,
-    pub premium: f64,
-    pub score: f64,
-    pub annualized_yield_pct: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredOptionCandidate {
     pub symbol: String,
     pub beta: f64,
@@ -171,22 +161,12 @@ pub struct ScoredOptionCandidate {
     pub option_bid: f64,
     pub option_ask: Option<f64>,
     pub delta: Option<f64>,
-    pub itm_depth_pct: f64,
-    pub downside_buffer_pct: f64,
+    pub itm_depth_ratio: f64,
+    pub downside_buffer_ratio: f64,
     pub expiration_profit_per_share: f64,
-    pub annualized_yield_pct: f64,
-    pub expiration_yield_pct: f64,
+    pub annualized_yield_ratio: f64,
+    pub expiration_yield_ratio: f64,
     pub score: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScoreInputs {
-    pub underlying_price: f64,
-    pub strike: f64,
-    pub premium: f64,
-    pub days_to_expiration: i64,
-    pub beta: f64,
-    pub is_call: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -302,7 +282,7 @@ pub struct OrderIntent {
 pub struct CapitalAllocationView {
     pub source: String,
     pub reported_amount: Option<f64>,
-    pub reserve_pct: f64,
+    pub reserve_ratio: f64,
     pub reserve_amount: f64,
     pub cash_after_reserve: f64,
     pub deployment_budget: f64,

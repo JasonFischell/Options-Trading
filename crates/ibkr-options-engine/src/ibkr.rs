@@ -777,8 +777,8 @@ pub fn select_buy_write_contracts(
     reference_price: f64,
     config: &AppConfig,
 ) -> Result<Vec<SelectedOptionContract>> {
-    let max_strike = reference_price * (1.0 - config.strategy.min_itm_depth_pct);
-    let min_strike = reference_price * (1.0 - config.strategy.max_itm_depth_pct);
+    let max_strike = reference_price * (1.0 - config.strategy.min_itm_depth_ratio);
+    let min_strike = reference_price * (1.0 - config.strategy.max_itm_depth_ratio);
     let mut candidates: Vec<SelectedOptionContract> = Vec::new();
     let mut total_expirations = 0usize;
     let mut expirations_matching_filter = 0usize;
@@ -1255,7 +1255,7 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 expiration_dates: vec!["20991217".to_string(), "21000121".to_string()],
-                min_itm_depth_pct: 0.05,
+                min_itm_depth_ratio: 0.05,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -1361,7 +1361,7 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_itm_depth_pct: 0.05,
+                min_itm_depth_ratio: 0.05,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -1472,7 +1472,7 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 expiration_dates: vec![target_expiry.clone()],
-                min_itm_depth_pct: 0.01,
+                min_itm_depth_ratio: 0.01,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -1527,7 +1527,7 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 expiration_dates: vec![far_expiry.clone()],
-                min_itm_depth_pct: 0.01,
+                min_itm_depth_ratio: 0.01,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {

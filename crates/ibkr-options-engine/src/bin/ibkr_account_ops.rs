@@ -315,7 +315,9 @@ async fn build_close_bag_plans(
 
     for open_position in open_positions {
         if !requested_symbols.is_empty()
-            && !requested_symbols.iter().any(|symbol| symbol == &open_position.symbol)
+            && !requested_symbols
+                .iter()
+                .any(|symbol| symbol == &open_position.symbol)
         {
             continue;
         }
@@ -328,9 +330,13 @@ async fn build_close_bag_plans(
 
     for symbol in requested_symbols {
         if !plans.iter().any(|plan| &plan.symbol == symbol)
-            && !skipped.iter().any(|line| line.starts_with(&format!("{symbol}:")))
+            && !skipped
+                .iter()
+                .any(|line| line.starts_with(&format!("{symbol}:")))
         {
-            skipped.push(format!("{symbol}: symbol was requested but no open position is present"));
+            skipped.push(format!(
+                "{symbol}: symbol was requested but no open position is present"
+            ));
         }
     }
 
@@ -369,7 +375,12 @@ async fn build_close_bag_plan(
                     .as_deref()
                     .is_some_and(|right| right.eq_ignore_ascii_case("C"))
         })
-        .with_context(|| format!("missing short call position details for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing short call position details for {}",
+                open_position.symbol
+            )
+        })?;
 
     let stock_contract = resolve_primary_stock_contract(client, &open_position.symbol).await?;
     let selected = SelectedOptionContract {
@@ -395,13 +406,23 @@ async fn build_close_bag_plan(
         .bid
         .or(underlying.last)
         .or(underlying.close)
-        .with_context(|| format!("missing usable stock exit price for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing usable stock exit price for {}",
+                open_position.symbol
+            )
+        })?;
     let option_cover_price = option_quote
         .ask
         .or(option_quote.last)
         .or(option_quote.close)
         .or(option_quote.option_price)
-        .with_context(|| format!("missing usable option cover price for {}", open_position.symbol))?;
+        .with_context(|| {
+            format!(
+                "missing usable option cover price for {}",
+                open_position.symbol
+            )
+        })?;
     let estimated_limit_credit = round_to_cents(stock_exit_price - option_cover_price);
     if estimated_limit_credit <= 0.0 {
         anyhow::bail!(

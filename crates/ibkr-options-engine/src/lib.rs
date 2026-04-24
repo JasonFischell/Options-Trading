@@ -8,6 +8,5 @@ pub mod models;
 pub mod paper_state;
 pub mod reporting;
 pub mod scanner;
-pub mod scoring;
 pub mod state;
 pub mod strategy;

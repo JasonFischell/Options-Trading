@@ -292,9 +292,9 @@ fn build_capital_source_details(
     let routed_orders = capital_allocation_view(
         "available_funds",
         account.available_funds,
-        config.allocation.min_cash_reserve_pct,
+        config.allocation.min_cash_reserve_ratio,
         config.allocation.deployment_budget,
-        config.allocation.max_cash_per_symbol_pct,
+        config.allocation.max_cash_per_symbol_ratio,
     );
     let preview = match config.allocation.capital_source {
         CapitalSource::AvailableFunds => routed_orders.clone(),
@@ -306,7 +306,7 @@ fn build_capital_source_details(
             account.buying_power,
             0.0,
             config.allocation.deployment_budget,
-            config.allocation.max_cash_per_symbol_pct,
+            config.allocation.max_cash_per_symbol_ratio,
         ),
     };
 
@@ -320,21 +320,21 @@ fn build_capital_source_details(
 fn capital_allocation_view(
     source: &str,
     reported_amount: Option<f64>,
-    reserve_pct: f64,
+    reserve_ratio: f64,
     deployment_budget: f64,
-    max_cash_per_symbol_pct: f64,
+    max_cash_per_symbol_ratio: f64,
 ) -> CapitalAllocationView {
     let reported_amount = reported_amount.filter(|value| value.is_finite() && *value > 0.0);
-    let reserve_amount = reported_amount.unwrap_or(0.0) * (reserve_pct.max(0.0) / 100.0);
+    let reserve_amount = reported_amount.unwrap_or(0.0) * reserve_ratio.max(0.0);
     let cash_after_reserve = (reported_amount.unwrap_or(0.0) - reserve_amount).max(0.0);
     let deployment_budget = deployment_budget.max(0.0);
     let deployable_cash = cash_after_reserve.min(deployment_budget);
-    let max_cash_per_symbol = deployment_budget * (max_cash_per_symbol_pct.max(0.0) / 100.0);
+    let max_cash_per_symbol = deployment_budget * max_cash_per_symbol_ratio.max(0.0);
 
     CapitalAllocationView {
         source: source.to_string(),
         reported_amount,
-        reserve_pct,
+        reserve_ratio,
         reserve_amount,
         cash_after_reserve,
         deployment_budget,
@@ -386,26 +386,31 @@ fn build_candidate_allocation_plan(
         });
     }
 
-    let expiration_yield_pct = (expiration_profit_per_share / combo_limit_price) * 100.0;
-    if expiration_yield_pct < config.strategy.min_expiration_yield_pct {
+    let expiration_yield_ratio = expiration_profit_per_share / combo_limit_price;
+    if expiration_yield_ratio < config.strategy.min_expiration_yield_ratio {
         return Err(GuardrailRejection {
             symbol: candidate.symbol.clone(),
             stage: "pricing".to_string(),
             reason: format!(
                 "combo BAG debit {:.2} yields only {:.2}% to expiration, below configured minimum {:.2}%",
-                combo_limit_price, expiration_yield_pct, config.strategy.min_expiration_yield_pct
+                combo_limit_price,
+                expiration_yield_ratio * 100.0,
+                config.strategy.min_expiration_yield_ratio * 100.0
             ),
         });
     }
 
-    let annualized_yield_pct = expiration_yield_pct / (candidate.days_to_expiration as f64 / 365.0);
-    if annualized_yield_pct < config.strategy.min_annualized_yield_pct {
+    let annualized_yield_ratio =
+        expiration_yield_ratio / (candidate.days_to_expiration as f64 / 365.0);
+    if annualized_yield_ratio < config.strategy.min_annualized_yield_ratio {
         return Err(GuardrailRejection {
             symbol: candidate.symbol.clone(),
             stage: "pricing".to_string(),
             reason: format!(
                 "combo BAG debit {:.2} yields only {:.2}% annualized, below configured minimum {:.2}%",
-                combo_limit_price, annualized_yield_pct, config.strategy.min_annualized_yield_pct
+                combo_limit_price,
+                annualized_yield_ratio * 100.0,
+                config.strategy.min_annualized_yield_ratio * 100.0
             ),
         });
     }
@@ -564,9 +569,9 @@ fn combo_limit_price_from_profit_floor(
 ) -> f64 {
     let min_profit_cap = candidate.strike - strategy.min_expiration_profit_per_share;
     let min_expiration_yield_cap =
-        max_debit_for_yield_floor(candidate.strike, strategy.min_expiration_yield_pct / 100.0);
+        max_debit_for_yield_floor(candidate.strike, strategy.min_expiration_yield_ratio);
     let annualized_floor =
-        strategy.min_annualized_yield_pct / 100.0 * (candidate.days_to_expiration as f64 / 365.0);
+        strategy.min_annualized_yield_ratio * (candidate.days_to_expiration as f64 / 365.0);
     let min_annualized_yield_cap = max_debit_for_yield_floor(candidate.strike, annualized_floor);
 
     min_profit_cap
@@ -612,8 +617,8 @@ mod tests {
                 ..RiskConfig::default()
             },
             allocation: AllocationConfig {
-                max_cash_per_symbol_pct: 100.0,
-                min_cash_reserve_pct: 0.0,
+                max_cash_per_symbol_ratio: 1.0,
+                min_cash_reserve_ratio: 0.0,
                 ..AllocationConfig::default()
             },
             performance: PerformanceConfig::default(),
@@ -639,11 +644,11 @@ mod tests {
             option_bid: 14.0,
             option_ask: Some(14.1),
             delta: Some(0.8),
-            itm_depth_pct: 0.1,
-            downside_buffer_pct: 0.14,
+            itm_depth_ratio: 0.1,
+            downside_buffer_ratio: 0.14,
             expiration_profit_per_share: 4.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 4.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.04,
             score: 0.2,
         }
     }
@@ -666,11 +671,11 @@ mod tests {
             option_bid: 5.5,
             option_ask: Some(5.6),
             delta: Some(0.8),
-            itm_depth_pct: 0.1,
-            downside_buffer_pct: 0.14,
+            itm_depth_ratio: 0.1,
+            downside_buffer_ratio: 0.14,
             expiration_profit_per_share: 0.2,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 1.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.01,
             score: 0.2,
         }
     }
@@ -724,11 +729,11 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            itm_depth_pct: 0.03,
-            downside_buffer_pct: 0.15,
+            itm_depth_ratio: 0.03,
+            downside_buffer_ratio: 0.15,
             expiration_profit_per_share: 5.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 5.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.05,
             score: 0.2,
         };
         let positions = vec![InventoryPosition {
@@ -754,8 +759,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 10_000.0,
-                    max_cash_per_symbol_pct: 20.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.20,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -792,11 +797,11 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            itm_depth_pct: 0.03,
-            downside_buffer_pct: 0.15,
+            itm_depth_ratio: 0.03,
+            downside_buffer_ratio: 0.15,
             expiration_profit_per_share: 5.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 5.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.05,
             score: 0.2,
         };
         let second = ScoredOptionCandidate {
@@ -823,8 +828,8 @@ mod tests {
                 },
                 allocation: AllocationConfig {
                     deployment_budget: 50_000.0,
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -855,11 +860,11 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            itm_depth_pct: 0.03,
-            downside_buffer_pct: 0.15,
+            itm_depth_ratio: 0.03,
+            downside_buffer_ratio: 0.15,
             expiration_profit_per_share: 5.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 5.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.05,
             score: 0.2,
         };
 
@@ -909,11 +914,11 @@ mod tests {
             option_bid: 14.0,
             option_ask: Some(14.1),
             delta: Some(0.8),
-            itm_depth_pct: 0.1,
-            downside_buffer_pct: 0.14,
+            itm_depth_ratio: 0.1,
+            downside_buffer_ratio: 0.14,
             expiration_profit_per_share: 4.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 4.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.04,
             score: 0.2,
         };
 
@@ -957,11 +962,11 @@ mod tests {
             option_bid: 14.0,
             option_ask: Some(14.1),
             delta: Some(0.8),
-            itm_depth_pct: 0.1,
-            downside_buffer_pct: 0.14,
+            itm_depth_ratio: 0.1,
+            downside_buffer_ratio: 0.14,
             expiration_profit_per_share: 4.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 4.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.04,
             score: 0.2,
         };
 
@@ -1001,11 +1006,11 @@ mod tests {
             option_bid: 1.5,
             option_ask: Some(1.6),
             delta: Some(0.25),
-            itm_depth_pct: 0.03,
-            downside_buffer_pct: 0.15,
+            itm_depth_ratio: 0.03,
+            downside_buffer_ratio: 0.15,
             expiration_profit_per_share: 5.0,
-            annualized_yield_pct: 20.0,
-            expiration_yield_pct: 5.0,
+            annualized_yield_ratio: 0.20,
+            expiration_yield_ratio: 0.05,
             score: 0.2,
         };
 
@@ -1020,8 +1025,8 @@ mod tests {
             &[candidate],
             &AppConfig {
                 allocation: AllocationConfig {
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 strategy: StrategyConfig {
@@ -1052,8 +1057,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 18_000.0,
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1082,8 +1087,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 10_000.0,
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 15.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.15,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1120,8 +1125,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 50_000.0,
-                    max_cash_per_symbol_pct: 10.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.10,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1156,8 +1161,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 10_000.0,
-                    max_cash_per_symbol_pct: 20.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.20,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1192,8 +1197,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 10_000.0,
-                    max_cash_per_symbol_pct: 20.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.20,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1205,12 +1210,11 @@ mod tests {
         assert_eq!(result.allocation_summary.total_lots, 4);
         assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
         assert_eq!(result.allocation_summary.remaining_cash, 2_080.0);
-        assert!(
-            result
-                .rejections
-                .iter()
-                .any(|rejection| { rejection.reason.contains("proceeding with the valid subset") })
-        );
+        assert!(result.rejections.iter().any(|rejection| {
+            rejection
+                .reason
+                .contains("proceeding with the valid subset")
+        }));
     }
 
     #[test]
@@ -1243,8 +1247,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 9_900.0,
-                    max_cash_per_symbol_pct: 20.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.20,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1257,7 +1261,9 @@ mod tests {
         assert_eq!(result.allocation_summary.allocated_cash, 7_920.0);
         assert_eq!(result.allocation_summary.remaining_cash, 1_980.0);
         assert!(result.rejections.iter().any(|rejection| {
-            rejection.reason.contains("proceeding with the valid subset")
+            rejection
+                .reason
+                .contains("proceeding with the valid subset")
         }));
     }
 
@@ -1297,8 +1303,8 @@ mod tests {
                 },
                 allocation: AllocationConfig {
                     deployment_budget: 10_000.0,
-                    max_cash_per_symbol_pct: 20.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 0.20,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1332,8 +1338,8 @@ mod tests {
             &AppConfig {
                 allocation: AllocationConfig {
                     deployment_budget: 40_000.0,
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 0.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.0,
                     ..AllocationConfig::default()
                 },
                 ..test_config()
@@ -1366,8 +1372,8 @@ mod tests {
                 allocation: AllocationConfig {
                     deployment_budget: 20_000.0,
                     capital_source: CapitalSource::BuyingPower,
-                    max_cash_per_symbol_pct: 100.0,
-                    min_cash_reserve_pct: 5.0,
+                    max_cash_per_symbol_ratio: 1.0,
+                    min_cash_reserve_ratio: 0.05,
                 },
                 ..test_config()
             },

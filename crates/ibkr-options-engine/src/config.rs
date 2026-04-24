@@ -124,14 +124,14 @@ impl CapitalSource {
 pub struct StrategyConfig {
     pub default_beta: f64,
     pub expiration_dates: Vec<String>,
-    pub min_annualized_yield_pct: f64,
-    pub min_expiration_yield_pct: f64,
+    pub min_annualized_yield_ratio: f64,
+    pub min_expiration_yield_ratio: f64,
     pub min_expiration_profit_per_share: f64,
-    pub min_itm_depth_pct: f64,
-    pub max_itm_depth_pct: f64,
-    pub min_downside_buffer_pct: f64,
+    pub min_itm_depth_ratio: f64,
+    pub max_itm_depth_ratio: f64,
+    pub min_downside_buffer_ratio: f64,
     pub min_option_bid: f64,
-    pub max_option_spread_pct: f64,
+    pub max_option_spread_ratio: f64,
 }
 
 impl Default for StrategyConfig {
@@ -139,14 +139,14 @@ impl Default for StrategyConfig {
         Self {
             default_beta: 1.5,
             expiration_dates: Vec::new(),
-            min_annualized_yield_pct: 12.0,
-            min_expiration_yield_pct: 1.0,
+            min_annualized_yield_ratio: 0.12,
+            min_expiration_yield_ratio: 0.01,
             min_expiration_profit_per_share: 0.05,
-            min_itm_depth_pct: 0.0,
-            max_itm_depth_pct: 0.50,
-            min_downside_buffer_pct: 0.10,
+            min_itm_depth_ratio: 0.0,
+            max_itm_depth_ratio: 0.50,
+            min_downside_buffer_ratio: 0.10,
             min_option_bid: 0.08,
-            max_option_spread_pct: 0.25,
+            max_option_spread_ratio: 0.25,
         }
     }
 }
@@ -159,7 +159,7 @@ pub struct RiskConfig {
     pub max_option_quotes_per_underlying: usize,
     pub max_new_trades_per_cycle: usize,
     pub max_open_positions: usize,
-    pub min_buying_power_buffer_pct: f64,
+    pub min_buying_power_buffer_ratio: f64,
     pub enable_paper_orders: bool,
     pub enable_live_orders: bool,
 }
@@ -173,7 +173,7 @@ impl Default for RiskConfig {
             max_option_quotes_per_underlying: 3,
             max_new_trades_per_cycle: 5,
             max_open_positions: 5,
-            min_buying_power_buffer_pct: 5.0,
+            min_buying_power_buffer_ratio: 0.05,
             enable_paper_orders: false,
             enable_live_orders: false,
         }
@@ -184,8 +184,8 @@ impl Default for RiskConfig {
 pub struct AllocationConfig {
     pub deployment_budget: f64,
     pub capital_source: CapitalSource,
-    pub max_cash_per_symbol_pct: f64,
-    pub min_cash_reserve_pct: f64,
+    pub max_cash_per_symbol_ratio: f64,
+    pub min_cash_reserve_ratio: f64,
 }
 
 impl Default for AllocationConfig {
@@ -193,8 +193,8 @@ impl Default for AllocationConfig {
         Self {
             deployment_budget: 10_000.0,
             capital_source: CapitalSource::AvailableFunds,
-            max_cash_per_symbol_pct: 20.0,
-            min_cash_reserve_pct: 5.0,
+            max_cash_per_symbol_ratio: 0.20,
+            min_cash_reserve_ratio: 0.05,
         }
     }
 }
@@ -314,8 +314,12 @@ impl AppConfig {
 fn default_config_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     [
-        cwd.join("docs").join("local").join("ibkr-options-engine.paper-trading.toml"),
-        cwd.join("docs").join("local").join("ibkr-options-engine.example.toml"),
+        cwd.join("docs")
+            .join("local")
+            .join("ibkr-options-engine.paper-trading.toml"),
+        cwd.join("docs")
+            .join("local")
+            .join("ibkr-options-engine.example.toml"),
         cwd.join("ibkr-options-engine.paper-trading.toml"),
         cwd.join("ibkr-options-engine.toml"),
     ]
@@ -340,27 +344,27 @@ struct ConfigOverrides {
     symbols: SourceOption<Vec<String>>,
     expiration_dates: SourceOption<Vec<String>>,
     default_beta: Option<f64>,
-    min_annualized_yield_pct: Option<f64>,
-    min_expiration_yield_pct: Option<f64>,
+    min_annualized_yield_ratio: Option<f64>,
+    min_expiration_yield_ratio: Option<f64>,
     min_expiration_profit_per_share: Option<f64>,
-    min_itm_depth_pct: Option<f64>,
-    max_itm_depth_pct: Option<f64>,
-    min_downside_buffer_pct: Option<f64>,
+    min_itm_depth_ratio: Option<f64>,
+    max_itm_depth_ratio: Option<f64>,
+    min_downside_buffer_ratio: Option<f64>,
     min_option_bid: Option<f64>,
-    max_option_spread_pct: Option<f64>,
+    max_option_spread_ratio: Option<f64>,
     min_underlying_price: Option<f64>,
     max_underlying_price: Option<f64>,
     max_underlyings_per_cycle: Option<usize>,
     max_option_quotes_per_underlying: Option<usize>,
     max_new_trades_per_cycle: Option<usize>,
     max_open_positions: Option<usize>,
-    min_buying_power_buffer_pct: Option<f64>,
+    min_buying_power_buffer_ratio: Option<f64>,
     enable_paper_orders: Option<bool>,
     enable_live_orders: Option<bool>,
     deployment_budget: Option<f64>,
     capital_source: Option<CapitalSource>,
-    max_cash_per_symbol_pct: Option<f64>,
-    min_cash_reserve_pct: Option<f64>,
+    max_cash_per_symbol_ratio: Option<f64>,
+    min_cash_reserve_ratio: Option<f64>,
     symbol_concurrency: Option<usize>,
     option_quote_concurrency_per_symbol: Option<usize>,
     auto_reprice: Option<bool>,
@@ -445,14 +449,19 @@ impl ConfigOverrides {
                 first_optional_env(&["DEFAULT_BETA"]).as_deref(),
                 "DEFAULT_BETA",
             )?,
-            min_annualized_yield_pct: parse_optional_num(
-                first_optional_env(&["MIN_ANNUALIZED_YIELD_PCT"]).as_deref(),
-                "MIN_ANNUALIZED_YIELD_PCT",
+            min_annualized_yield_ratio: parse_optional_ratio_env(
+                &["MIN_ANNUALIZED_YIELD_RATIO", "MIN_ANNUALIZED_YIELD_PCT"],
+                "MIN_ANNUALIZED_YIELD_RATIO",
+                &mut startup_warnings,
             )?,
-            min_expiration_yield_pct: parse_optional_num(
-                first_optional_env(&["MIN_PROFIT_PCT_OF_INVESTMENT", "MIN_EXPIRATION_YIELD_PCT"])
-                    .as_deref(),
-                "MIN_PROFIT_PCT_OF_INVESTMENT",
+            min_expiration_yield_ratio: parse_optional_ratio_env(
+                &[
+                    "MIN_EXPIRATION_YIELD_RATIO",
+                    "MIN_PROFIT_PCT_OF_INVESTMENT",
+                    "MIN_EXPIRATION_YIELD_PCT",
+                ],
+                "MIN_EXPIRATION_YIELD_RATIO",
+                &mut startup_warnings,
             )?,
             min_expiration_profit_per_share: parse_optional_num(
                 first_optional_env(&[
@@ -462,26 +471,33 @@ impl ConfigOverrides {
                 .as_deref(),
                 "MIN_PROFIT_DOLLARS_PER_SHARE",
             )?,
-            min_itm_depth_pct: parse_optional_num(
-                first_optional_env(&["MIN_ITM_DEPTH_PCT"]).as_deref(),
-                "MIN_ITM_DEPTH_PCT",
+            min_itm_depth_ratio: parse_optional_ratio_env(
+                &["MIN_ITM_DEPTH_RATIO", "MIN_ITM_DEPTH_PCT"],
+                "MIN_ITM_DEPTH_RATIO",
+                &mut startup_warnings,
             )?,
-            max_itm_depth_pct: parse_optional_num(
-                first_optional_env(&["MAX_ITM_DEPTH_PCT"]).as_deref(),
-                "MAX_ITM_DEPTH_PCT",
+            max_itm_depth_ratio: parse_optional_ratio_env(
+                &["MAX_ITM_DEPTH_RATIO", "MAX_ITM_DEPTH_PCT"],
+                "MAX_ITM_DEPTH_RATIO",
+                &mut startup_warnings,
             )?,
-            min_downside_buffer_pct: parse_optional_num(
-                first_optional_env(&["MIN_PROFIT_BUFFER_PCT", "MIN_DOWNSIDE_BUFFER_PCT"])
-                    .as_deref(),
-                "MIN_PROFIT_BUFFER_PCT",
+            min_downside_buffer_ratio: parse_optional_ratio_env(
+                &[
+                    "MIN_DOWNSIDE_BUFFER_RATIO",
+                    "MIN_PROFIT_BUFFER_PCT",
+                    "MIN_DOWNSIDE_BUFFER_PCT",
+                ],
+                "MIN_DOWNSIDE_BUFFER_RATIO",
+                &mut startup_warnings,
             )?,
             min_option_bid: parse_optional_num(
                 first_optional_env(&["MIN_OPTION_BID"]).as_deref(),
                 "MIN_OPTION_BID",
             )?,
-            max_option_spread_pct: parse_optional_num(
-                first_optional_env(&["MAX_OPTION_SPREAD_PCT"]).as_deref(),
-                "MAX_OPTION_SPREAD_PCT",
+            max_option_spread_ratio: parse_optional_ratio_env(
+                &["MAX_OPTION_SPREAD_RATIO", "MAX_OPTION_SPREAD_PCT"],
+                "MAX_OPTION_SPREAD_RATIO",
+                &mut startup_warnings,
             )?,
             min_underlying_price: parse_optional_num(
                 first_optional_env(&["MIN_UNDERLYING_PRICE"]).as_deref(),
@@ -507,9 +523,13 @@ impl ConfigOverrides {
                 first_optional_env(&["MAX_OPEN_POSITIONS"]).as_deref(),
                 "MAX_OPEN_POSITIONS",
             )?,
-            min_buying_power_buffer_pct: parse_optional_num(
-                first_optional_env(&["MIN_BUYING_POWER_BUFFER_PCT"]).as_deref(),
-                "MIN_BUYING_POWER_BUFFER_PCT",
+            min_buying_power_buffer_ratio: parse_optional_ratio_env(
+                &[
+                    "MIN_BUYING_POWER_BUFFER_RATIO",
+                    "MIN_BUYING_POWER_BUFFER_PCT",
+                ],
+                "MIN_BUYING_POWER_BUFFER_RATIO",
+                &mut startup_warnings,
             )?,
             enable_paper_orders: parse_optional(
                 first_optional_env(&["ENABLE_PAPER_ORDERS"]).as_deref(),
@@ -527,14 +547,19 @@ impl ConfigOverrides {
                 first_optional_env(&["CAPITAL_SOURCE"]).as_deref(),
                 CapitalSource::parse,
             )?,
-            max_cash_per_symbol_pct: parse_optional_num(
-                first_optional_env(&["MAX_DISTRIBUTION_PER_SYMBOL_PCT", "MAX_CASH_PER_SYMBOL_PCT"])
-                    .as_deref(),
-                "MAX_DISTRIBUTION_PER_SYMBOL_PCT",
+            max_cash_per_symbol_ratio: parse_optional_ratio_env(
+                &[
+                    "MAX_CASH_PER_SYMBOL_RATIO",
+                    "MAX_DISTRIBUTION_PER_SYMBOL_PCT",
+                    "MAX_CASH_PER_SYMBOL_PCT",
+                ],
+                "MAX_CASH_PER_SYMBOL_RATIO",
+                &mut startup_warnings,
             )?,
-            min_cash_reserve_pct: parse_optional_num(
-                first_optional_env(&["MIN_CASH_RESERVE_PCT"]).as_deref(),
-                "MIN_CASH_RESERVE_PCT",
+            min_cash_reserve_ratio: parse_optional_ratio_env(
+                &["MIN_CASH_RESERVE_RATIO", "MIN_CASH_RESERVE_PCT"],
+                "MIN_CASH_RESERVE_RATIO",
+                &mut startup_warnings,
             )?,
             symbol_concurrency: parse_optional_num(
                 first_optional_env(&["SYMBOL_CONCURRENCY"]).as_deref(),
@@ -584,24 +609,28 @@ impl ConfigOverrides {
         self.symbols = higher.symbols.or(self.symbols.clone());
         self.expiration_dates = higher.expiration_dates.or(self.expiration_dates.clone());
         self.default_beta = higher.default_beta.or(self.default_beta.take());
-        self.min_annualized_yield_pct = higher
-            .min_annualized_yield_pct
-            .or(self.min_annualized_yield_pct.take());
-        self.min_expiration_yield_pct = higher
-            .min_expiration_yield_pct
-            .or(self.min_expiration_yield_pct.take());
+        self.min_annualized_yield_ratio = higher
+            .min_annualized_yield_ratio
+            .or(self.min_annualized_yield_ratio.take());
+        self.min_expiration_yield_ratio = higher
+            .min_expiration_yield_ratio
+            .or(self.min_expiration_yield_ratio.take());
         self.min_expiration_profit_per_share = higher
             .min_expiration_profit_per_share
             .or(self.min_expiration_profit_per_share.take());
-        self.min_itm_depth_pct = higher.min_itm_depth_pct.or(self.min_itm_depth_pct.take());
-        self.max_itm_depth_pct = higher.max_itm_depth_pct.or(self.max_itm_depth_pct.take());
-        self.min_downside_buffer_pct = higher
-            .min_downside_buffer_pct
-            .or(self.min_downside_buffer_pct.take());
+        self.min_itm_depth_ratio = higher
+            .min_itm_depth_ratio
+            .or(self.min_itm_depth_ratio.take());
+        self.max_itm_depth_ratio = higher
+            .max_itm_depth_ratio
+            .or(self.max_itm_depth_ratio.take());
+        self.min_downside_buffer_ratio = higher
+            .min_downside_buffer_ratio
+            .or(self.min_downside_buffer_ratio.take());
         self.min_option_bid = higher.min_option_bid.or(self.min_option_bid.take());
-        self.max_option_spread_pct = higher
-            .max_option_spread_pct
-            .or(self.max_option_spread_pct.take());
+        self.max_option_spread_ratio = higher
+            .max_option_spread_ratio
+            .or(self.max_option_spread_ratio.take());
         self.min_underlying_price = higher
             .min_underlying_price
             .or(self.min_underlying_price.take());
@@ -618,21 +647,21 @@ impl ConfigOverrides {
             .max_new_trades_per_cycle
             .or(self.max_new_trades_per_cycle.take());
         self.max_open_positions = higher.max_open_positions.or(self.max_open_positions.take());
-        self.min_buying_power_buffer_pct = higher
-            .min_buying_power_buffer_pct
-            .or(self.min_buying_power_buffer_pct.take());
+        self.min_buying_power_buffer_ratio = higher
+            .min_buying_power_buffer_ratio
+            .or(self.min_buying_power_buffer_ratio.take());
         self.enable_paper_orders = higher
             .enable_paper_orders
             .or(self.enable_paper_orders.take());
         self.enable_live_orders = higher.enable_live_orders.or(self.enable_live_orders.take());
         self.deployment_budget = higher.deployment_budget.or(self.deployment_budget.take());
         self.capital_source = higher.capital_source.or(self.capital_source.take());
-        self.max_cash_per_symbol_pct = higher
-            .max_cash_per_symbol_pct
-            .or(self.max_cash_per_symbol_pct.take());
-        self.min_cash_reserve_pct = higher
-            .min_cash_reserve_pct
-            .or(self.min_cash_reserve_pct.take());
+        self.max_cash_per_symbol_ratio = higher
+            .max_cash_per_symbol_ratio
+            .or(self.max_cash_per_symbol_ratio.take());
+        self.min_cash_reserve_ratio = higher
+            .min_cash_reserve_ratio
+            .or(self.min_cash_reserve_ratio.take());
         self.symbol_concurrency = higher.symbol_concurrency.or(self.symbol_concurrency.take());
         self.option_quote_concurrency_per_symbol = higher
             .option_quote_concurrency_per_symbol
@@ -700,12 +729,12 @@ impl ConfigOverrides {
             capital_source: self
                 .capital_source
                 .unwrap_or(allocation_defaults.capital_source),
-            max_cash_per_symbol_pct: self
-                .max_cash_per_symbol_pct
-                .unwrap_or(allocation_defaults.max_cash_per_symbol_pct),
-            min_cash_reserve_pct: self
-                .min_cash_reserve_pct
-                .unwrap_or(allocation_defaults.min_cash_reserve_pct),
+            max_cash_per_symbol_ratio: self
+                .max_cash_per_symbol_ratio
+                .unwrap_or(allocation_defaults.max_cash_per_symbol_ratio),
+            min_cash_reserve_ratio: self
+                .min_cash_reserve_ratio
+                .unwrap_or(allocation_defaults.min_cash_reserve_ratio),
         };
         if matches!(allocation.capital_source, CapitalSource::BuyingPower) {
             startup_warnings.push(
@@ -732,30 +761,30 @@ impl ConfigOverrides {
             strategy: StrategyConfig {
                 default_beta: self.default_beta.unwrap_or(strategy_defaults.default_beta),
                 expiration_dates,
-                min_annualized_yield_pct: self
-                    .min_annualized_yield_pct
-                    .unwrap_or(strategy_defaults.min_annualized_yield_pct),
-                min_expiration_yield_pct: self
-                    .min_expiration_yield_pct
-                    .unwrap_or(strategy_defaults.min_expiration_yield_pct),
+                min_annualized_yield_ratio: self
+                    .min_annualized_yield_ratio
+                    .unwrap_or(strategy_defaults.min_annualized_yield_ratio),
+                min_expiration_yield_ratio: self
+                    .min_expiration_yield_ratio
+                    .unwrap_or(strategy_defaults.min_expiration_yield_ratio),
                 min_expiration_profit_per_share: self
                     .min_expiration_profit_per_share
                     .unwrap_or(strategy_defaults.min_expiration_profit_per_share),
-                min_itm_depth_pct: self
-                    .min_itm_depth_pct
-                    .unwrap_or(strategy_defaults.min_itm_depth_pct),
-                max_itm_depth_pct: self
-                    .max_itm_depth_pct
-                    .unwrap_or(strategy_defaults.max_itm_depth_pct),
-                min_downside_buffer_pct: self
-                    .min_downside_buffer_pct
-                    .unwrap_or(strategy_defaults.min_downside_buffer_pct),
+                min_itm_depth_ratio: self
+                    .min_itm_depth_ratio
+                    .unwrap_or(strategy_defaults.min_itm_depth_ratio),
+                max_itm_depth_ratio: self
+                    .max_itm_depth_ratio
+                    .unwrap_or(strategy_defaults.max_itm_depth_ratio),
+                min_downside_buffer_ratio: self
+                    .min_downside_buffer_ratio
+                    .unwrap_or(strategy_defaults.min_downside_buffer_ratio),
                 min_option_bid: self
                     .min_option_bid
                     .unwrap_or(strategy_defaults.min_option_bid),
-                max_option_spread_pct: self
-                    .max_option_spread_pct
-                    .unwrap_or(strategy_defaults.max_option_spread_pct),
+                max_option_spread_ratio: self
+                    .max_option_spread_ratio
+                    .unwrap_or(strategy_defaults.max_option_spread_ratio),
             },
             risk: RiskConfig {
                 min_underlying_price: self
@@ -776,9 +805,9 @@ impl ConfigOverrides {
                 max_open_positions: self
                     .max_open_positions
                     .unwrap_or(risk_defaults.max_open_positions),
-                min_buying_power_buffer_pct: self
-                    .min_buying_power_buffer_pct
-                    .unwrap_or(risk_defaults.min_buying_power_buffer_pct),
+                min_buying_power_buffer_ratio: self
+                    .min_buying_power_buffer_ratio
+                    .unwrap_or(risk_defaults.min_buying_power_buffer_ratio),
                 enable_paper_orders: self
                     .enable_paper_orders
                     .unwrap_or(risk_defaults.enable_paper_orders),
@@ -901,11 +930,19 @@ struct StrategySection {
     min_profit_dollars_per_share: Option<f64>,
     min_profit_pct_of_investment: Option<f64>,
     min_profit_buffer_pct: Option<f64>,
-    min_annualized_yield_pct: Option<f64>,
-    min_itm_depth_pct: Option<f64>,
-    max_itm_depth_pct: Option<f64>,
+    #[serde(alias = "min_annualized_yield_pct")]
+    min_annualized_yield_ratio: Option<f64>,
+    #[serde(alias = "min_expiration_yield_pct")]
+    min_expiration_yield_ratio: Option<f64>,
+    #[serde(alias = "min_itm_depth_pct")]
+    min_itm_depth_ratio: Option<f64>,
+    #[serde(alias = "max_itm_depth_pct")]
+    max_itm_depth_ratio: Option<f64>,
+    #[serde(alias = "min_downside_buffer_pct")]
+    min_downside_buffer_ratio: Option<f64>,
     min_option_bid: Option<f64>,
-    max_option_spread_pct: Option<f64>,
+    #[serde(alias = "max_option_spread_pct")]
+    max_option_spread_ratio: Option<f64>,
     default_beta: Option<f64>,
 }
 
@@ -914,8 +951,10 @@ struct AllocationSection {
     deployment_budget: Option<f64>,
     capital_source: Option<String>,
     max_distribution_per_symbol_pct: Option<f64>,
-    max_cash_per_symbol_pct: Option<f64>,
-    min_cash_reserve_pct: Option<f64>,
+    #[serde(alias = "max_cash_per_symbol_pct")]
+    max_cash_per_symbol_ratio: Option<f64>,
+    #[serde(alias = "min_cash_reserve_pct")]
+    min_cash_reserve_ratio: Option<f64>,
     max_new_trades_per_cycle: Option<usize>,
     max_open_positions: Option<usize>,
 }
@@ -935,7 +974,8 @@ struct ExecutionSection {
     auto_reprice: Option<bool>,
     reprice_attempts: Option<usize>,
     reprice_wait_seconds: Option<u64>,
-    min_buying_power_buffer_pct: Option<f64>,
+    #[serde(alias = "min_buying_power_buffer_pct")]
+    min_buying_power_buffer_ratio: Option<f64>,
 }
 
 impl FileConfig {
@@ -946,6 +986,7 @@ impl FileConfig {
         let allocation = self.allocation.unwrap_or_default();
         let performance = self.performance.unwrap_or_default();
         let execution = self.execution.unwrap_or_default();
+        let mut startup_warnings = Vec::new();
 
         Ok(ConfigOverrides {
             host: normalize_optional_string(broker.host),
@@ -985,21 +1026,78 @@ impl FileConfig {
                 None => SourceOption::Unset,
             },
             default_beta: strategy.default_beta,
-            min_annualized_yield_pct: strategy.min_annualized_yield_pct,
-            min_expiration_yield_pct: strategy.min_profit_pct_of_investment,
+            min_annualized_yield_ratio: normalize_optional_ratio(
+                strategy.min_annualized_yield_ratio,
+                "strategy.min_annualized_yield_ratio",
+                "strategy.min_annualized_yield_ratio",
+                &mut startup_warnings,
+            )?
+            .or(normalize_optional_ratio(
+                strategy.min_profit_pct_of_investment,
+                "strategy.min_profit_pct_of_investment",
+                "strategy.min_expiration_yield_ratio",
+                &mut startup_warnings,
+            )?),
+            min_expiration_yield_ratio: normalize_optional_ratio(
+                strategy.min_expiration_yield_ratio,
+                "strategy.min_expiration_yield_ratio",
+                "strategy.min_expiration_yield_ratio",
+                &mut startup_warnings,
+            )?
+            .or(normalize_optional_ratio(
+                strategy.min_profit_pct_of_investment,
+                "strategy.min_profit_pct_of_investment",
+                "strategy.min_expiration_yield_ratio",
+                &mut startup_warnings,
+            )?),
             min_expiration_profit_per_share: strategy.min_profit_dollars_per_share,
-            min_itm_depth_pct: strategy.min_itm_depth_pct,
-            max_itm_depth_pct: strategy.max_itm_depth_pct,
-            min_downside_buffer_pct: strategy.min_profit_buffer_pct,
+            min_itm_depth_ratio: normalize_optional_ratio(
+                strategy.min_itm_depth_ratio,
+                "strategy.min_itm_depth_ratio",
+                "strategy.min_itm_depth_ratio",
+                &mut startup_warnings,
+            )?,
+            max_itm_depth_ratio: normalize_optional_ratio(
+                strategy.max_itm_depth_ratio,
+                "strategy.max_itm_depth_ratio",
+                "strategy.max_itm_depth_ratio",
+                &mut startup_warnings,
+            )?,
+            min_downside_buffer_ratio: normalize_optional_ratio(
+                strategy.min_downside_buffer_ratio,
+                "strategy.min_downside_buffer_ratio",
+                "strategy.min_downside_buffer_ratio",
+                &mut startup_warnings,
+            )?
+            .or(normalize_optional_ratio(
+                strategy.min_profit_buffer_pct,
+                "strategy.min_profit_buffer_pct",
+                "strategy.min_downside_buffer_ratio",
+                &mut startup_warnings,
+            )?),
             min_option_bid: strategy.min_option_bid,
-            max_option_spread_pct: strategy.max_option_spread_pct,
+            max_option_spread_ratio: normalize_optional_ratio(
+                strategy.max_option_spread_ratio,
+                "strategy.max_option_spread_ratio",
+                "strategy.max_option_spread_ratio",
+                &mut startup_warnings,
+            )?,
             min_underlying_price: strategy.min_underlying_price,
             max_underlying_price: strategy.max_underlying_price,
             max_underlyings_per_cycle: performance.max_underlyings_per_cycle,
             max_option_quotes_per_underlying: performance.max_option_quotes_per_underlying,
             max_new_trades_per_cycle: allocation.max_new_trades_per_cycle,
             max_open_positions: allocation.max_open_positions,
-            min_buying_power_buffer_pct: execution.min_buying_power_buffer_pct,
+            min_buying_power_buffer_ratio: normalize_optional_ratio(
+                execution.min_buying_power_buffer_ratio,
+                if execution.min_buying_power_buffer_ratio.is_some() {
+                    "execution.min_buying_power_buffer_ratio"
+                } else {
+                    "execution.min_buying_power_buffer_pct"
+                },
+                "execution.min_buying_power_buffer_ratio",
+                &mut startup_warnings,
+            )?,
             enable_paper_orders: execution.enable_paper_orders,
             enable_live_orders: execution.enable_live_orders,
             deployment_budget: allocation.deployment_budget,
@@ -1007,16 +1105,34 @@ impl FileConfig {
                 normalize_optional_string(allocation.capital_source).as_deref(),
                 CapitalSource::parse,
             )?,
-            max_cash_per_symbol_pct: allocation
-                .max_distribution_per_symbol_pct
-                .or(allocation.max_cash_per_symbol_pct),
-            min_cash_reserve_pct: allocation.min_cash_reserve_pct,
+            max_cash_per_symbol_ratio: normalize_optional_ratio(
+                allocation
+                    .max_cash_per_symbol_ratio
+                    .or(allocation.max_distribution_per_symbol_pct),
+                if allocation.max_cash_per_symbol_ratio.is_some() {
+                    "allocation.max_cash_per_symbol_ratio"
+                } else {
+                    "allocation.max_distribution_per_symbol_pct"
+                },
+                "allocation.max_cash_per_symbol_ratio",
+                &mut startup_warnings,
+            )?,
+            min_cash_reserve_ratio: normalize_optional_ratio(
+                allocation.min_cash_reserve_ratio,
+                if allocation.min_cash_reserve_ratio.is_some() {
+                    "allocation.min_cash_reserve_ratio"
+                } else {
+                    "allocation.min_cash_reserve_pct"
+                },
+                "allocation.min_cash_reserve_ratio",
+                &mut startup_warnings,
+            )?,
             symbol_concurrency: performance.symbol_concurrency,
             option_quote_concurrency_per_symbol: performance.option_quote_concurrency_per_symbol,
             auto_reprice: execution.auto_reprice,
             reprice_attempts: execution.reprice_attempts,
             reprice_wait_seconds: execution.reprice_wait_seconds,
-            startup_warnings: Vec::new(),
+            startup_warnings,
         })
     }
 }
@@ -1088,6 +1204,11 @@ fn first_optional_env(keys: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn first_present_env<'a>(keys: &'a [&'a str]) -> Option<(&'a str, String)> {
+    keys.iter()
+        .find_map(|key| std::env::var(key).ok().map(|value| (*key, value)))
+}
+
 fn parse_optional<T, F>(value: Option<&str>, parser: F) -> Result<Option<T>>
 where
     F: FnOnce(&str) -> Result<T>,
@@ -1107,6 +1228,60 @@ where
                 .map_err(|error| anyhow::anyhow!("{label} must be numeric: {error}"))
         })
         .transpose()
+}
+
+fn parse_optional_ratio_env(
+    keys: &[&str],
+    canonical_name: &str,
+    startup_warnings: &mut Vec<String>,
+) -> Result<Option<f64>> {
+    let Some((used_key, raw_value)) = first_present_env(keys) else {
+        return Ok(None);
+    };
+    let value = raw_value
+        .trim()
+        .parse::<f64>()
+        .map_err(|error| anyhow::anyhow!("{used_key} must be numeric: {error}"))?;
+    normalize_ratio_value(value, used_key, canonical_name, startup_warnings).map(Some)
+}
+
+fn normalize_optional_ratio(
+    value: Option<f64>,
+    source_name: &str,
+    canonical_name: &str,
+    startup_warnings: &mut Vec<String>,
+) -> Result<Option<f64>> {
+    value
+        .map(|value| normalize_ratio_value(value, source_name, canonical_name, startup_warnings))
+        .transpose()
+}
+
+fn normalize_ratio_value(
+    value: f64,
+    source_name: &str,
+    canonical_name: &str,
+    startup_warnings: &mut Vec<String>,
+) -> Result<f64> {
+    if !value.is_finite() {
+        anyhow::bail!("{source_name} must be finite");
+    }
+    if value < 0.0 {
+        anyhow::bail!("{source_name} must be non-negative");
+    }
+
+    let normalized = if value > 1.0 { value / 100.0 } else { value };
+    if source_name != canonical_name {
+        startup_warnings.push(format!(
+            "{source_name} is deprecated; use {canonical_name} with ratio values in the 0.0..=1.0 range."
+        ));
+    }
+    if value > 1.0 {
+        startup_warnings.push(format!(
+            "{source_name}={value} was interpreted as a whole percent and normalized to ratio {normalized:.6}."
+        ));
+    }
+
+    Ok(normalized)
 }
 
 pub fn parse_bool(value: &str) -> Result<bool> {
@@ -1262,7 +1437,7 @@ max_distribution_per_symbol_pct = 15
         assert_eq!(config.strategy.expiration_dates, vec!["20260619"]);
         assert_eq!(config.allocation.deployment_budget, 2500.0);
         assert_eq!(config.allocation.capital_source, CapitalSource::BuyingPower);
-        assert_eq!(config.allocation.max_cash_per_symbol_pct, 15.0);
+        assert_eq!(config.allocation.max_cash_per_symbol_ratio, 0.15);
         assert!(
             config
                 .startup_warnings
@@ -1278,7 +1453,6 @@ max_distribution_per_symbol_pct = 15
     fn auto_loads_default_paper_trading_config_from_current_directory() {
         clear_env();
 
-        let original_dir = std::env::current_dir().unwrap();
         let test_dir = temp_test_dir("autodiscover");
         let local_dir = test_dir.join("docs").join("local");
         std::fs::create_dir_all(&local_dir).unwrap();
@@ -1303,8 +1477,7 @@ enable_paper_orders = true
         )
         .unwrap();
 
-        std::env::set_current_dir(&test_dir).unwrap();
-        let config = AppConfig::from_env().unwrap();
+        let config = AppConfig::from_path(Some(&path)).unwrap();
 
         assert_eq!(config.account, "DU-AUTO");
         assert_eq!(config.symbols, vec!["NVTS"]);
@@ -1316,9 +1489,8 @@ enable_paper_orders = true
                 && warning.contains("ibkr-options-engine.paper-trading.toml")
         }));
 
-        std::env::set_current_dir(&original_dir).unwrap();
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir_all(test_dir).unwrap();
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(test_dir);
         clear_env();
     }
 
@@ -1337,7 +1509,7 @@ enable_paper_orders = true
         assert!(error.contains("ticker file or at least one ticker"));
 
         std::env::set_current_dir(&original_dir).unwrap();
-        std::fs::remove_dir(test_dir).unwrap();
+        std::fs::remove_dir_all(test_dir).unwrap();
         clear_env();
     }
 
@@ -1371,12 +1543,12 @@ expiration_dates = ["20260515"]
             config.allocation.capital_source,
             CapitalSource::AvailableFunds
         );
-        assert_eq!(config.allocation.max_cash_per_symbol_pct, 20.0);
+        assert_eq!(config.allocation.max_cash_per_symbol_ratio, 0.20);
         assert_eq!(config.risk.max_new_trades_per_cycle, 5);
         assert_eq!(config.risk.max_open_positions, 5);
         assert_eq!(config.strategy.min_expiration_profit_per_share, 0.05);
-        assert_eq!(config.strategy.min_expiration_yield_pct, 1.0);
-        assert_eq!(config.strategy.min_downside_buffer_pct, 0.10);
+        assert_eq!(config.strategy.min_expiration_yield_ratio, 0.01);
+        assert_eq!(config.strategy.min_downside_buffer_ratio, 0.10);
 
         std::fs::remove_file(path).unwrap();
         clear_env();

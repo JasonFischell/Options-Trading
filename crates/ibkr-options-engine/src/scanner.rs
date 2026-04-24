@@ -270,7 +270,7 @@ where
                         candidate.right,
                         candidate.strike,
                         candidate.expiry,
-                        candidate.annualized_yield_pct,
+                        candidate.annualized_yield_ratio * 100.0,
                         candidate.expiration_profit_per_share,
                         candidate.score
                     ));
@@ -720,9 +720,9 @@ mod tests {
             startup_warnings: Vec::new(),
             strategy: StrategyConfig {
                 expiration_dates: vec!["20991217".to_string()],
-                min_annualized_yield_pct: 0.01,
-                min_itm_depth_pct: 0.01,
-                min_downside_buffer_pct: 0.01,
+                min_annualized_yield_ratio: 0.0001,
+                min_itm_depth_ratio: 0.01,
+                min_downside_buffer_ratio: 0.01,
                 ..StrategyConfig::default()
             },
             risk: RiskConfig {
@@ -731,8 +731,8 @@ mod tests {
                 ..RiskConfig::default()
             },
             allocation: AllocationConfig {
-                max_cash_per_symbol_pct: 100.0,
-                min_cash_reserve_pct: 0.0,
+                max_cash_per_symbol_ratio: 1.0,
+                min_cash_reserve_ratio: 0.0,
                 ..AllocationConfig::default()
             },
             performance: PerformanceConfig::default(),
@@ -998,10 +998,9 @@ mod tests {
                 && rejection.reason == "no usable market data snapshot returned"
         }));
         assert!(
-            report
-                .action_log
-                .iter()
-                .any(|entry| entry.contains("000430: no market-data snapshot was returned by IBKR."))
+            report.action_log.iter().any(
+                |entry| entry.contains("000430: no market-data snapshot was returned by IBKR.")
+            )
         );
 
         clear_test_ledger_dir("DU123");

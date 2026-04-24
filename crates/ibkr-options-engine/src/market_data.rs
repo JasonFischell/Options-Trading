@@ -14,10 +14,10 @@ use crate::{
     ibkr::{
         IbkrClientDescriptor, SelectedOptionContract, cancel_open_order, connect,
         fetch_account_state, fetch_completed_orders, fetch_open_orders, fetch_positions,
-        is_invalid_option_contract_error, is_invalid_underlying_contract_error,
-        log_server_time, market_data_mode_label, request_option_chain_for_underlying,
-        request_option_quote, request_underlying_snapshot_for_contract,
-        resolve_primary_stock_contract, select_buy_write_contracts, switch_market_data_mode,
+        is_invalid_option_contract_error, is_invalid_underlying_contract_error, log_server_time,
+        market_data_mode_label, request_option_chain_for_underlying, request_option_quote,
+        request_underlying_snapshot_for_contract, resolve_primary_stock_contract,
+        select_buy_write_contracts, switch_market_data_mode,
     },
     models::{
         AccountState, BrokerCompletedOrder, BrokerOpenOrder, InventoryPosition,
@@ -139,20 +139,19 @@ impl MarketDataProvider for IbkrMarketDataProvider {
         record: &UniverseRecord,
         config: &AppConfig,
     ) -> Result<Option<SymbolMarketSnapshot>> {
-        let primary_contract = match resolve_primary_stock_contract(&self.client, &record.symbol)
-            .await
-        {
-            Ok(primary_contract) => primary_contract,
-            Err(error) if is_invalid_underlying_contract_error(&error) => {
-                warn!(
-                    symbol = %record.symbol,
-                    error = %error,
-                    "skipping symbol because IBKR could not resolve the underlying contract"
-                );
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
+        let primary_contract =
+            match resolve_primary_stock_contract(&self.client, &record.symbol).await {
+                Ok(primary_contract) => primary_contract,
+                Err(error) if is_invalid_underlying_contract_error(&error) => {
+                    warn!(
+                        symbol = %record.symbol,
+                        error = %error,
+                        "skipping symbol because IBKR could not resolve the underlying contract"
+                    );
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
         let mut underlying = request_underlying_snapshot_for_contract(
             &self.client,
             &record.symbol,
