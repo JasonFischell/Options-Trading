@@ -78,7 +78,19 @@ where
     let mut option_quotes_considered = 0usize;
     let mut non_live_symbols = BTreeSet::new();
     let mut warnings = Vec::new();
-    let mut action_log = vec![format!(
+    let mut diagnostic_log = config.startup_warnings.clone();
+    let mut action_log = Vec::new();
+    let mut api_log = vec![format!(
+        "IBKR session targeting {} {} at {} with client_id={}.",
+        config.platform.label(),
+        match config.mode {
+            crate::config::RuntimeMode::Paper => "paper",
+            crate::config::RuntimeMode::Live => "live",
+        },
+        config.endpoint(),
+        config.client_id
+    )];
+    diagnostic_log.push(format!(
         "Loaded {} symbols for a {} scan in {} mode against {}.",
         universe.len(),
         match config.run_mode {
@@ -91,9 +103,13 @@ where
             "broker-connected"
         },
         config.platform.label()
-    )];
-    action_log.push(format!(
+    ));
+    diagnostic_log.push(format!(
         "Account summary for {}: buying_power={:?}, available_funds={:?}, net_liquidation={:?}.",
+        account.account, account.buying_power, account.available_funds, account.net_liquidation
+    ));
+    api_log.push(format!(
+        "Received IBKR account state for {} with buying_power={:?}, available_funds={:?}, net_liquidation={:?}.",
         account.account, account.buying_power, account.available_funds, account.net_liquidation
     ));
 
@@ -115,6 +131,11 @@ where
         let mut completed_orders;
         open_orders = provider.load_open_orders().await?;
         completed_orders = provider.load_completed_orders().await?;
+        api_log.push(format!(
+            "Loaded {} open order(s) and {} completed order(s) from IBKR before routing.",
+            open_orders.len(),
+            completed_orders.len()
+        ));
         paper_trade_ledger.reconcile_with_broker_orders(
             &open_orders,
             &completed_orders,
@@ -128,6 +149,10 @@ where
             .collect::<Vec<_>>();
         for order in &stale_open_orders {
             provider.cancel_order(order.order_id).await?;
+            api_log.push(format!(
+                "Sent cancel request for stale strategy order {} on {}.",
+                order.order_id, order.symbol
+            ));
             action_log.push(format!(
                 "{}: requested cancellation for unfilled strategy BAG order {} before new paper submissions.",
                 order.symbol, order.order_id
@@ -137,6 +162,11 @@ where
         if !stale_open_orders.is_empty() {
             open_orders = provider.load_open_orders().await?;
             completed_orders = provider.load_completed_orders().await?;
+            api_log.push(format!(
+                "Reloaded IBKR order state after cancellations; {} open order(s), {} completed order(s).",
+                open_orders.len(),
+                completed_orders.len()
+            ));
             paper_trade_ledger.reconcile_with_broker_orders(
                 &open_orders,
                 &completed_orders,
@@ -151,7 +181,7 @@ where
         .option_quote_concurrency_per_symbol
         .max(1);
     provider.prepare_scan_cycle(config).await?;
-    action_log.push(format!(
+    api_log.push(format!(
         "Prepared market-data mode {} once for this cycle with symbol_concurrency={} and option_quote_concurrency_per_symbol={}.",
         crate::ibkr::market_data_mode_label(config.market_data_mode),
         symbol_concurrency,
@@ -159,15 +189,26 @@ where
     ));
 
     let market_data_started = Instant::now();
-    let mut snapshot_results = stream::iter(universe.iter().cloned().enumerate().map(
+    let mut snapshot_results = Vec::with_capacity(universe.len());
+    let mut snapshot_stream = stream::iter(universe.iter().cloned().enumerate().map(
         |(index, record)| async move {
             let snapshot = provider.fetch_symbol_snapshot(&record, config).await;
             (index, record, snapshot)
         },
     ))
-    .buffer_unordered(symbol_concurrency)
-    .collect::<Vec<_>>()
-    .await;
+    .buffer_unordered(symbol_concurrency);
+    let total_symbols = universe.len();
+    let mut completed_symbol_requests = 0usize;
+    while let Some(result) = snapshot_stream.next().await {
+        completed_symbol_requests += 1;
+        if config.logs.print_statements {
+            println!(
+                "PROGRESS: stocks analyzed {}/{} | options considered {}",
+                completed_symbol_requests, total_symbols, option_quotes_considered
+            );
+        }
+        snapshot_results.push(result);
+    }
     snapshot_results.sort_by_key(|(index, _, _)| *index);
     let market_data_elapsed_ms = market_data_started.elapsed().as_millis() as i64;
 
@@ -180,6 +221,10 @@ where
                     "{} could not be resolved to an IBKR stock contract and was skipped: {}",
                     record.symbol, error
                 ));
+                api_log.push(format!(
+                    "{}: IBKR rejected the underlying contract lookup with {}.",
+                    record.symbol, error
+                ));
                 None
             }
             Err(error) => return Err(error),
@@ -190,7 +235,7 @@ where
                 stage: "market-data".to_string(),
                 reason: "no usable market data snapshot returned".to_string(),
             });
-            action_log.push(format!(
+            diagnostic_log.push(format!(
                 "{}: no market-data snapshot was returned by IBKR.",
                 record.symbol
             ));
@@ -198,6 +243,11 @@ where
         };
 
         underlying_snapshots += 1;
+        api_log.push(format!(
+            "{}: IBKR returned an underlying snapshot and {} option quote candidate(s).",
+            record.symbol,
+            snapshot.option_quotes.len()
+        ));
         if snapshot.underlying.is_non_live() {
             non_live_symbols.insert(record.symbol.clone());
             warnings.push(format!(
@@ -205,7 +255,7 @@ where
                 record.symbol, snapshot.underlying.price_source
             ));
         }
-        action_log.push(format!(
+        diagnostic_log.push(format!(
             "{}: underlying reference {:?} from {}.",
             record.symbol,
             snapshot.underlying.reference_price(),
@@ -225,7 +275,7 @@ where
                 stage: "market-data".to_string(),
                 reason: format!("missing usable underlying price{diagnostic_suffix}"),
             });
-            action_log.push(format!(
+            diagnostic_log.push(format!(
                 "{}: rejected before option screening because no usable underlying price was available.",
                 record.symbol
             ));
@@ -241,7 +291,7 @@ where
                     price, config.risk.min_underlying_price, config.risk.max_underlying_price
                 ),
             });
-            action_log.push(format!(
+            diagnostic_log.push(format!(
                 "{}: rejected by underlying price filter at {:.2}.",
                 record.symbol, price
             ));
@@ -264,7 +314,7 @@ where
                 &config.strategy,
             ) {
                 Ok(candidate) => {
-                    action_log.push(format!(
+                    diagnostic_log.push(format!(
                         "{}: accepted {} {:.2} expiring {} with annualized yield {:.2}%, expiration profit {:.2}/share, and score {:.4}.",
                         candidate.symbol,
                         candidate.right,
@@ -286,7 +336,7 @@ where
                             option_quote.diagnostics.join(" | ")
                         );
                     }
-                    action_log.push(format!(
+                    diagnostic_log.push(format!(
                         "{}: rejected {} {:.2} expiring {} because {}.",
                         option_quote.symbol,
                         option_quote.right,
@@ -325,7 +375,7 @@ where
     let mut open_positions = intent_build.open_positions;
     guardrail_rejections.extend(intent_build.rejections);
     paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
-    action_log.push(format!(
+    diagnostic_log.push(format!(
         "Capital allocation: configured_source={} | preview {}={:?} deployable {:.2} | routed {}={:?} deployable {:.2} | per-symbol distribution cap {:.2} | selected {} symbol(s) / {} lot(s) across {} collapsed candidate symbol(s) | existing exposure {:.2} | newly allocated {:.2} | remaining {:.2}.",
         configured_source,
         preview.source,
@@ -388,6 +438,20 @@ where
     }
 
     let execution_records = executor.execute(&proposed_orders, config).await?;
+    api_log.extend(
+        execution_records
+            .iter()
+            .filter(|record| record.symbol != "N/A")
+            .map(|record| {
+                format!(
+                    "{}: broker submission mode={} status={} order_events={}.",
+                    record.symbol,
+                    record.submission_mode,
+                    record.status,
+                    record.broker_event_timeline.len()
+                )
+            }),
+    );
     paper_trade_ledger.record_execution_results(
         &execution_records,
         &proposed_orders,
@@ -401,12 +465,21 @@ where
     {
         let refreshed_open_orders = provider.load_open_orders().await?;
         let refreshed_completed_orders = provider.load_completed_orders().await?;
+        api_log.push(format!(
+            "Reloaded IBKR orders after submissions; {} open order(s), {} completed order(s).",
+            refreshed_open_orders.len(),
+            refreshed_completed_orders.len()
+        ));
         paper_trade_ledger.reconcile_with_broker_orders(
             &refreshed_open_orders,
             &refreshed_completed_orders,
             &mut action_log,
         );
         let refreshed_positions = provider.load_inventory().await?;
+        api_log.push(format!(
+            "Reloaded {} inventory position row(s) after submissions.",
+            refreshed_positions.len()
+        ));
         open_positions = crate::state::summarize_open_positions(&refreshed_positions);
         paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
         action_log.push(
@@ -491,7 +564,9 @@ where
             remaining_cash,
         },
         warnings,
+        diagnostic_log,
         action_log,
+        api_log,
         timing_metrics,
         throughput_counters,
         human_log_path: None,
@@ -552,8 +627,8 @@ mod tests {
 
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
-            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         execution::OrderExecutor,
         market_data::{MarketDataProvider, SymbolMarketSnapshot},
@@ -737,6 +812,10 @@ mod tests {
             },
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig {
+                print_statements: false,
+                ..LogsConfig::default()
+            },
         }
     }
 
@@ -926,17 +1005,17 @@ mod tests {
             .unwrap();
 
         let aapl_log = report
-            .action_log
+            .diagnostic_log
             .iter()
             .position(|entry| entry.contains("AAPL: underlying reference"))
             .unwrap();
         let msft_log = report
-            .action_log
+            .diagnostic_log
             .iter()
             .position(|entry| entry.contains("MSFT: underlying reference"))
             .unwrap();
         let nvda_log = report
-            .action_log
+            .diagnostic_log
             .iter()
             .position(|entry| entry.contains("NVDA: underlying reference"))
             .unwrap();
@@ -998,7 +1077,7 @@ mod tests {
                 && rejection.reason == "no usable market data snapshot returned"
         }));
         assert!(
-            report.action_log.iter().any(
+            report.diagnostic_log.iter().any(
                 |entry| entry.contains("000430: no market-data snapshot was returned by IBKR.")
             )
         );

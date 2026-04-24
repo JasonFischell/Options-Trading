@@ -15,7 +15,7 @@ use serde::Serialize;
 use tokio::time::{Duration, timeout};
 
 use crate::{
-    artifacts::logs_dir,
+    artifacts::timestamped_log_path,
     config::{AppConfig, RuntimeMode},
     models::{
         BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, ExecutionStepTiming,
@@ -302,7 +302,16 @@ where
     ) -> Result<Vec<ExecutionRecord>> {
         let mut records = Vec::new();
 
-        for intent in intents {
+        for (index, intent) in intents.iter().enumerate() {
+            if config.logs.print_statements && paper_submission_enabled(config) {
+                println!(
+                    "PROGRESS: placing trade {}/{} for {}",
+                    index + 1,
+                    intents.len(),
+                    intent.symbol
+                );
+            }
+
             if config.risk.enable_live_orders || matches!(config.mode, RuntimeMode::Live) {
                 records.push(analysis_only_record(
                     intent,
@@ -525,24 +534,29 @@ where
 
         let order_id = final_order_id
             .with_context(|| format!("no IBKR order id was allocated for {}", intent.symbol))?;
-        let persist_started = Instant::now();
-        let broker_event_log_path =
-            persist_broker_event_log(&intent.symbol, &intent.account, order_id, &all_events)?;
-        push_step_timing(
-            &mut step_timings,
-            "persist-broker-event-log",
-            persist_started,
-            None,
-            Some(order_id),
-            Some(current_limit_price),
-        );
+        let broker_event_log_path = if config.logs.api_log {
+            let persist_started = Instant::now();
+            let path =
+                persist_broker_event_log(&intent.symbol, &intent.account, order_id, &all_events)?;
+            push_step_timing(
+                &mut step_timings,
+                "persist-broker-event-log",
+                persist_started,
+                None,
+                Some(order_id),
+                Some(current_limit_price),
+            );
+            Some(path.display().to_string())
+        } else {
+            None
+        };
 
         Ok((
             SubmittedOrderOutcome {
                 order_id,
                 is_combo: true,
                 events: all_events,
-                broker_event_log_path: Some(broker_event_log_path.display().to_string()),
+                broker_event_log_path,
             },
             step_timings,
         ))
@@ -682,14 +696,11 @@ fn persist_broker_event_log(
     order_id: i32,
     events: &[TimedBrokerOrderEvent],
 ) -> Result<std::path::PathBuf> {
-    let logs_dir = logs_dir();
-    fs::create_dir_all(&logs_dir)
-        .context("failed to create logs directory for broker event logs")?;
-    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-    let path = logs_dir.join(format!(
-        "ibkr-order-events-{}-{}-{}-{}.json",
-        timestamp, account, symbol, order_id
-    ));
+    let path = timestamped_log_path("api", "API", "json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .context("failed to create logs directory for broker event logs")?;
+    }
     let timeline = events
         .iter()
         .map(|event| BrokerEventTimelineEntry {
@@ -1174,8 +1185,8 @@ mod tests {
     };
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
-            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{InstrumentType, OrderIntent, OrderLegIntent, TradeAction},
     };
@@ -1271,6 +1282,10 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig {
+                print_statements: false,
+                ..LogsConfig::default()
+            },
         }
     }
 

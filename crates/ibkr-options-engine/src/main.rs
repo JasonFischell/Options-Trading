@@ -3,7 +3,7 @@ use clap::Parser;
 use dotenvy::dotenv;
 use ibkr_options_engine::{
     cli::{Cli, Command, ConfigArgs},
-    config::AppConfig,
+    config::{AppConfig, RuntimeMode},
     execution::GuardedPaperOrderExecutor,
     ibkr::{
         connect, fetch_account_state, fetch_completed_orders, fetch_open_orders, fetch_positions,
@@ -12,7 +12,7 @@ use ibkr_options_engine::{
     market_data::{IbkrMarketDataProvider, load_universe},
     models::StatusReport,
     paper_state::PaperTradeLedger,
-    reporting::{render_status_log, write_cycle_outputs, write_status_outputs},
+    reporting::{render_trade_summary, write_cycle_outputs, write_status_outputs},
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
 };
@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
 
 async fn run_scan(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::from_path(args.config.as_deref())?;
+    print_preflight_messages(&config);
     let universe = load_universe(&config)?;
     let symbols = universe
         .iter()
@@ -52,12 +53,12 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
         execution_mode = plan.execution_mode,
         "loaded IBKR engine configuration"
     );
-    for startup_warning in &config.startup_warnings {
-        warn!("{startup_warning}");
-    }
     info!("{}", config.connection_guidance());
 
     if !config.connect_on_start {
+        if config.logs.print_statements {
+            println!("WARN: connect_on_start is false; skipping broker connection.");
+        }
         warn!("IBKR_CONNECT_ON_START is false; skipping live connectivity probe");
         return Ok(());
     }
@@ -71,39 +72,75 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
                 config.connection_guidance()
             )
         })?;
+    if config.logs.print_statements {
+        println!(
+            "INFO: connected to {} at {}",
+            config.platform.label(),
+            config.endpoint()
+        );
+    }
     let executor = GuardedPaperOrderExecutor::from_client(provider.shared_client());
     let mut report = run_scan_cycle(&provider, &executor, &config).await?;
-    let (human_log_path, json_report_path) = write_cycle_outputs(&config, &report)?;
-    report.human_log_path = Some(human_log_path.display().to_string());
+    let outputs = write_cycle_outputs(&config, &report)?;
+    report.human_log_path = outputs
+        .diagnostic_log_path
+        .as_ref()
+        .or(outputs.action_log_path.as_ref())
+        .or(outputs.trade_log_path.as_ref())
+        .or(outputs.api_log_path.as_ref())
+        .map(|path| path.display().to_string());
 
     info!(
-        human_log_path = %human_log_path.display(),
-        json_report_path = %json_report_path.display(),
+        diagnostic_log_path = ?outputs.diagnostic_log_path.as_ref().map(|path| path.display().to_string()),
+        action_log_path = ?outputs.action_log_path.as_ref().map(|path| path.display().to_string()),
+        trade_log_path = ?outputs.trade_log_path.as_ref().map(|path| path.display().to_string()),
+        api_log_path = ?outputs.api_log_path.as_ref().map(|path| path.display().to_string()),
         "wrote scan artifacts"
     );
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    println!(
-        "Human-readable log: {}\nJSON report: {}",
-        human_log_path.display(),
-        json_report_path.display()
-    );
+    if config.logs.print_statements {
+        println!(
+            "COMPLETE: scanned {} stock(s), captured {} underlying snapshot(s), considered {} option quote(s), proposed {} order(s), recorded {} execution record(s).",
+            report.symbols_scanned,
+            report.underlying_snapshots,
+            report.option_quotes_considered,
+            report.proposed_orders.len(),
+            report.execution_records.len()
+        );
+        for warning in &report.warnings {
+            println!("WARN: {warning}");
+        }
+        for line in outputs.terminal_lines() {
+            println!("{line}");
+        }
+        let trade_summaries = render_trade_summary(&report);
+        if !trade_summaries.is_empty() {
+            println!("TRADES PLACED:");
+            for trade in trade_summaries {
+                println!("- {trade}");
+            }
+        }
+    }
 
     Ok(())
 }
 
 async fn run_status(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::from_path(args.config.as_deref())?;
-    for startup_warning in &config.startup_warnings {
-        warn!("{startup_warning}");
-    }
+    print_preflight_messages(&config);
 
     if !config.connect_on_start {
+        if config.logs.print_statements {
+            println!("WARN: connect_on_start is false; status requires a broker connection.");
+        }
         warn!("IBKR_CONNECT_ON_START is false; status output requires a broker connection");
         return Ok(());
     }
 
     let client = connect(&config.endpoint(), config.client_id).await?;
-    log_server_time(&client).await?;
+    let server_time = log_server_time(&client).await?;
+    if config.logs.print_statements {
+        println!("INFO: connected to IBKR, server time {}", server_time);
+    }
 
     let account_state = fetch_account_state(&client, &config.account).await?;
     let positions = fetch_positions(&client).await?;
@@ -111,11 +148,31 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
     let open_orders = fetch_open_orders(&client, &config.account).await?;
     let completed_orders = fetch_completed_orders(&client, &config.account).await?;
     let mut ledger = PaperTradeLedger::load(&config)?;
+    let mut diagnostic_log = config.startup_warnings.clone();
     let mut action_log = Vec::new();
+    let mut api_log = vec![
+        format!(
+            "Connected to {} at {}.",
+            config.platform.label(),
+            config.endpoint()
+        ),
+        format!("Server time reported by IBKR: {server_time}."),
+        format!("Fetched {} inventory row(s).", positions.len()),
+        format!(
+            "Fetched {} open order(s) and {} completed order(s).",
+            open_orders.len(),
+            completed_orders.len()
+        ),
+    ];
 
     ledger.reconcile_with_positions(&open_positions, &mut action_log);
     ledger.reconcile_with_broker_orders(&open_orders, &completed_orders, &mut action_log);
     ledger.persist(&config)?;
+    diagnostic_log.push(format!(
+        "Status snapshot captured {} grouped open position(s).",
+        open_positions.len()
+    ));
+    api_log.push("Persisted refreshed paper-trade ledger state.".to_string());
 
     let report = StatusReport {
         account: config.account.clone(),
@@ -130,28 +187,59 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
         completed_orders,
         open_positions,
         paper_trade_lifecycle: ledger.snapshot(),
+        diagnostic_log,
         action_log,
+        api_log,
     };
-    let (human_log_path, json_report_path) = write_status_outputs(&config, &report)?;
+    let outputs = write_status_outputs(&config, &report)?;
 
     info!(
-        human_log_path = %human_log_path.display(),
-        json_report_path = %json_report_path.display(),
+        diagnostic_log_path = ?outputs.diagnostic_log_path.as_ref().map(|path| path.display().to_string()),
+        action_log_path = ?outputs.action_log_path.as_ref().map(|path| path.display().to_string()),
+        api_log_path = ?outputs.api_log_path.as_ref().map(|path| path.display().to_string()),
         "wrote status artifacts"
     );
-    println!("{}", render_status_log(&config, &report));
-    println!(
-        "Human-readable log: {}\nJSON report: {}",
-        human_log_path.display(),
-        json_report_path.display()
-    );
+    if config.logs.print_statements {
+        println!(
+            "STATUS: {} open position group(s), {} open order(s), {} completed order(s), {} lifecycle record(s).",
+            report.open_positions.len(),
+            report.open_orders.len(),
+            report.completed_orders.len(),
+            report.paper_trade_lifecycle.len()
+        );
+        for line in outputs.terminal_lines() {
+            println!("{line}");
+        }
+    }
 
     Ok(())
 }
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ibkr_options_engine=info"));
+        .unwrap_or_else(|_| EnvFilter::new("ibkr_options_engine=warn"));
 
     fmt().with_env_filter(filter).init();
+}
+
+fn print_preflight_messages(config: &AppConfig) {
+    if !config.logs.print_statements {
+        return;
+    }
+
+    match (config.risk.enable_live_orders, config.mode) {
+        (true, _) | (_, RuntimeMode::Live) => println!(
+            "WARN: LIVE-TRADING SETTINGS DETECTED. Automated live order routing remains disabled in this milestone."
+        ),
+        _ if config.guarded_paper_submission_enabled() => println!(
+            "WARN: paper-trading is enabled; qualifying orders may be routed to the IBKR paper account."
+        ),
+        _ => println!("INFO: read-only / analysis-only mode; no broker orders will be submitted."),
+    }
+
+    if config.guarded_paper_submission_enabled() && !config.prefers_live_market_data() {
+        println!(
+            "WARN: paper submission requires live market data; delayed or frozen symbols will be blocked."
+        );
+    }
 }

@@ -50,3 +50,10 @@ auto_reprice = true
 reprice_attempts = 3
 reprice_wait_seconds = 2
 min_buying_power_buffer_ratio = 0.05
+
+[logs]
+diagnostic_log = false
+action_log = false
+trade_log = true
+print_statements = true
+API_log = false

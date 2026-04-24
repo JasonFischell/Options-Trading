@@ -1,10 +1,9 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Local;
 
 use crate::{
-    artifacts::logs_dir,
+    artifacts::timestamped_log_path,
     config::AppConfig,
     models::{
         CycleReport, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, OrderIntent,
@@ -12,69 +11,92 @@ use crate::{
     },
 };
 
-pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<(PathBuf, PathBuf)> {
-    let logs_dir = logs_dir();
-    fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
-
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let base_name = format!(
-        "scan-{}-{}-{}",
-        timestamp,
-        config
-            .platform
-            .label()
-            .to_ascii_lowercase()
-            .replace(' ', "-"),
-        config.account
-    );
-
-    let human_log_path = logs_dir.join(format!("{base_name}.log"));
-    let json_report_path = logs_dir.join(format!("{base_name}.json"));
-
-    fs::write(&human_log_path, render_human_log(config, report))
-        .with_context(|| format!("failed to write human log to {}", human_log_path.display()))?;
-    fs::write(&json_report_path, serde_json::to_string_pretty(report)?).with_context(|| {
-        format!(
-            "failed to write JSON report to {}",
-            json_report_path.display()
-        )
-    })?;
-
-    Ok((human_log_path, json_report_path))
+#[derive(Debug, Default, Clone)]
+pub struct OutputArtifacts {
+    pub diagnostic_log_path: Option<PathBuf>,
+    pub action_log_path: Option<PathBuf>,
+    pub trade_log_path: Option<PathBuf>,
+    pub api_log_path: Option<PathBuf>,
 }
 
-pub fn write_status_outputs(
-    config: &AppConfig,
-    report: &StatusReport,
-) -> Result<(PathBuf, PathBuf)> {
-    let logs_dir = logs_dir();
-    fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
+impl OutputArtifacts {
+    pub fn terminal_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(path) = &self.diagnostic_log_path {
+            lines.push(format!("Diagnostic log: {}", path.display()));
+        }
+        if let Some(path) = &self.action_log_path {
+            lines.push(format!("Action log: {}", path.display()));
+        }
+        if let Some(path) = &self.trade_log_path {
+            lines.push(format!("Trade log: {}", path.display()));
+        }
+        if let Some(path) = &self.api_log_path {
+            lines.push(format!("API log: {}", path.display()));
+        }
+        lines
+    }
+}
 
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let base_name = format!(
-        "status-{}-{}-{}",
-        timestamp,
-        config
-            .platform
-            .label()
-            .to_ascii_lowercase()
-            .replace(' ', "-"),
-        config.account
-    );
+pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<OutputArtifacts> {
+    let mut outputs = OutputArtifacts::default();
 
-    let human_log_path = logs_dir.join(format!("{base_name}.log"));
-    let json_report_path = logs_dir.join(format!("{base_name}.json"));
+    if config.logs.diagnostic_log {
+        let path = timestamped_log_path("diagnostic", "diagnostic", "json");
+        write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
+        outputs.diagnostic_log_path = Some(path);
+    }
+    if config.logs.action_log {
+        let path = timestamped_log_path("action", "action", "log");
+        write_log_file(&path, &render_cycle_action_log(report))?;
+        outputs.action_log_path = Some(path);
+    }
+    if config.logs.trade_log {
+        let trade_log = render_trade_log(report);
+        if !trade_log.is_empty() {
+            let path = timestamped_log_path("trade", "trade", "log");
+            write_log_file(&path, &trade_log)?;
+            outputs.trade_log_path = Some(path);
+        }
+    }
+    if config.logs.api_log {
+        let path = timestamped_log_path("api", "API", "log");
+        write_log_file(&path, &render_cycle_api_log(config, report))?;
+        outputs.api_log_path = Some(path);
+    }
 
-    fs::write(&human_log_path, render_status_log(config, report))
-        .with_context(|| format!("failed to write human log to {}", human_log_path.display()))?;
-    fs::write(&json_report_path, serde_json::to_string_pretty(report)?).with_context(|| {
-        format!(
-            "failed to write JSON report to {}",
-            json_report_path.display()
-        )
-    })?;
+    Ok(outputs)
+}
 
-    Ok((human_log_path, json_report_path))
+pub fn write_status_outputs(config: &AppConfig, report: &StatusReport) -> Result<OutputArtifacts> {
+    let mut outputs = OutputArtifacts::default();
+
+    if config.logs.diagnostic_log {
+        let path = timestamped_log_path("diagnostic", "diagnostic", "json");
+        write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
+        outputs.diagnostic_log_path = Some(path);
+    }
+    if config.logs.action_log {
+        let path = timestamped_log_path("action", "action", "log");
+        write_log_file(&path, &render_status_action_log(report))?;
+        outputs.action_log_path = Some(path);
+    }
+    if config.logs.api_log {
+        let path = timestamped_log_path("api", "API", "log");
+        write_log_file(&path, &render_status_api_log(config, report))?;
+        outputs.api_log_path = Some(path);
+    }
+
+    Ok(outputs)
+}
+
+fn write_log_file(path: &PathBuf, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+    fs::write(path, contents)
+        .with_context(|| format!("failed to write log artifact to {}", path.display()))
 }
 
 pub fn render_human_log(config: &AppConfig, report: &CycleReport) -> String {
@@ -349,6 +371,147 @@ pub fn render_status_log(config: &AppConfig, report: &StatusReport) -> String {
     }
 
     lines.join("\n")
+}
+
+pub fn render_trade_summary(report: &CycleReport) -> Vec<String> {
+    report
+        .execution_records
+        .iter()
+        .filter(|record| {
+            record.submission_mode == "paper"
+                && record.symbol != "N/A"
+                && record.legs.iter().any(|leg| leg.order_id.is_some())
+        })
+        .map(|record| {
+            let stock_leg = record
+                .legs
+                .iter()
+                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Stock);
+            let option_leg = record
+                .legs
+                .iter()
+                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Option);
+            format!(
+                "{} | status={} | stock {} @ {} | option {} | order_ids={}",
+                record.symbol,
+                record.status,
+                stock_leg.map(|leg| leg.quantity).unwrap_or_default(),
+                format_optional_price(stock_leg.and_then(|leg| leg.limit_price)),
+                option_leg
+                    .map(render_trade_option_leg)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                record
+                    .legs
+                    .iter()
+                    .filter_map(|leg| leg.order_id)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect()
+}
+
+fn render_trade_log(report: &CycleReport) -> String {
+    let summaries = render_trade_summary(report);
+    if summaries.is_empty() {
+        String::new()
+    } else {
+        let mut lines = vec!["Trades Placed".to_string()];
+        lines.extend(summaries.into_iter().map(|line| format!("- {line}")));
+        lines.join("\n")
+    }
+}
+
+fn render_cycle_action_log(report: &CycleReport) -> String {
+    let mut lines = vec!["Action Log".to_string()];
+    lines.push(format!(
+        "Proposed orders: {} | execution records: {}",
+        report.proposed_orders.len(),
+        report.execution_records.len()
+    ));
+    if !report.action_log.is_empty() {
+        lines.push(String::new());
+        lines.push("Recorded actions:".to_string());
+        lines.extend(report.action_log.iter().map(|entry| format!("- {entry}")));
+    }
+    let execution_lines = render_execution_records(&report.execution_records);
+    if !execution_lines.is_empty() {
+        lines.push(String::new());
+        lines.push("Execution records:".to_string());
+        lines.extend(execution_lines);
+    }
+    lines.join("\n")
+}
+
+fn render_status_action_log(report: &StatusReport) -> String {
+    let mut lines = vec!["Action Log".to_string()];
+    lines.push(format!(
+        "Open orders: {} | completed orders: {} | lifecycle records: {}",
+        report.open_orders.len(),
+        report.completed_orders.len(),
+        report.paper_trade_lifecycle.len()
+    ));
+    if !report.action_log.is_empty() {
+        lines.push(String::new());
+        lines.push("Recorded actions:".to_string());
+        lines.extend(report.action_log.iter().map(|entry| format!("- {entry}")));
+    }
+    lines.join("\n")
+}
+
+fn render_cycle_api_log(config: &AppConfig, report: &CycleReport) -> String {
+    let mut lines = vec![
+        "API Log".to_string(),
+        format!("Endpoint: {}", config.endpoint()),
+        format!("Account: {}", config.account),
+    ];
+    lines.extend(report.api_log.iter().map(|entry| format!("- {entry}")));
+
+    let broker_event_records = report
+        .execution_records
+        .iter()
+        .filter(|record| !record.broker_event_timeline.is_empty())
+        .collect::<Vec<_>>();
+    if !broker_event_records.is_empty() {
+        lines.push(String::new());
+        lines.push("Broker event timelines:".to_string());
+        for record in broker_event_records {
+            lines.push(format!(
+                "- {} [{}] {} event(s)",
+                record.symbol,
+                record.status,
+                record.broker_event_timeline.len()
+            ));
+            lines.extend(record.broker_event_timeline.iter().map(|event| {
+                format!(
+                    "  +{}ms {} {}",
+                    event.elapsed_ms, event.event_type, event.detail
+                )
+            }));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_status_api_log(config: &AppConfig, report: &StatusReport) -> String {
+    let mut lines = vec![
+        "API Log".to_string(),
+        format!("Endpoint: {}", config.endpoint()),
+        format!("Account: {}", config.account),
+    ];
+    lines.extend(report.api_log.iter().map(|entry| format!("- {entry}")));
+    lines.join("\n")
+}
+
+fn render_trade_option_leg(leg: &ExecutionLegRecord) -> String {
+    format!(
+        "{} x{} @ {}",
+        leg.leg_symbol,
+        leg.quantity,
+        format_optional_price(leg.limit_price)
+    )
 }
 
 fn append_section(lines: &mut Vec<String>, title: &str, content: Vec<String>) {
@@ -821,8 +984,8 @@ mod tests {
     use super::{render_human_log, render_status_log};
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
-            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         models::{
             AccountState, AllocationSummary, BrokerCompletedOrder, BrokerOpenOrder,
@@ -854,6 +1017,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         }
     }
 
@@ -1040,7 +1204,9 @@ mod tests {
                 remaining_cash: 575.0,
             },
             warnings: vec!["example warning".to_string()],
+            diagnostic_log: vec!["example diagnostic".to_string()],
             action_log: vec!["example action".to_string()],
+            api_log: vec!["example api".to_string()],
             timing_metrics: CycleTimingMetrics {
                 total_elapsed_ms: 1_500,
                 market_data_elapsed_ms: 900,
@@ -1145,7 +1311,9 @@ mod tests {
                 observed_short_call_contracts: 1.0,
                 note: "tracked".to_string(),
             }],
+            diagnostic_log: vec!["status diagnostic".to_string()],
             action_log: vec!["AAPL: refreshed from broker snapshot.".to_string()],
+            api_log: vec!["Fetched status snapshot from IBKR.".to_string()],
         };
 
         let log = render_status_log(&test_config(), &report);

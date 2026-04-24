@@ -44,9 +44,16 @@ max_underlyings_per_cycle = 1000
 max_option_quotes_per_underlying = 4
 
 [execution]
-enable_paper_orders = true
+enable_paper_orders = false
 enable_live_orders = false
 auto_reprice = true
 reprice_attempts = 4
 reprice_wait_seconds = 4
 min_buying_power_buffer_pct = 5.0
+
+[logs]
+diagnostic_log = false
+action_log = false
+trade_log = true
+print_statements = true
+API_log = false

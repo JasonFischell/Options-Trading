@@ -433,7 +433,9 @@ pub struct CycleReport {
     pub capital_source_details: CapitalSourceDetails,
     pub allocation_summary: AllocationSummary,
     pub warnings: Vec<String>,
+    pub diagnostic_log: Vec<String>,
     pub action_log: Vec<String>,
+    pub api_log: Vec<String>,
     pub timing_metrics: CycleTimingMetrics,
     pub throughput_counters: CycleThroughputCounters,
     pub human_log_path: Option<String>,
@@ -454,7 +456,9 @@ pub struct StatusReport {
     pub completed_orders: Vec<BrokerCompletedOrder>,
     pub open_positions: Vec<OpenPositionState>,
     pub paper_trade_lifecycle: Vec<PaperTradeLifecycleRecord>,
+    pub diagnostic_log: Vec<String>,
     pub action_log: Vec<String>,
+    pub api_log: Vec<String>,
 }
 
 #[cfg(test)]

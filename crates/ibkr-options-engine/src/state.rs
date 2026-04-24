@@ -588,7 +588,8 @@ mod tests {
     use crate::{
         config::{
             AllocationConfig, AppConfig, BrokerPlatform, CapitalSource, ExecutionTuningConfig,
-            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            LogsConfig, MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode,
+            StrategyConfig,
         },
         models::{AccountState, InventoryPosition, ScoredOptionCandidate},
         state::{build_order_intents, summarize_open_positions},
@@ -623,6 +624,7 @@ mod tests {
             },
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         }
     }
 

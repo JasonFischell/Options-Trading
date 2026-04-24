@@ -60,7 +60,7 @@ impl IbkrMarketDataProvider {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
         let descriptor = IbkrClientDescriptor::from(config);
         let client = connect(&descriptor.endpoint, descriptor.client_id).await?;
-        log_server_time(&client).await?;
+        let _ = log_server_time(&client).await?;
         let delayed_fallback_descriptor = IbkrClientDescriptor {
             endpoint: descriptor.endpoint.clone(),
             client_id: descriptor
@@ -495,8 +495,8 @@ mod tests {
 
     use crate::{
         config::{
-            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
-            PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+            AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
+            MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
         },
         ibkr::{OptionChainMetadata, SelectedOptionContract},
         market_data::{delayed_retry_available, fetch_option_quotes_with, load_universe},
@@ -525,6 +525,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let universe = load_universe(&config).unwrap();
@@ -561,6 +562,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let universe = load_universe(&config).unwrap();

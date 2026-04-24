@@ -232,6 +232,27 @@ impl Default for ExecutionTuningConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogsConfig {
+    pub diagnostic_log: bool,
+    pub action_log: bool,
+    pub trade_log: bool,
+    pub print_statements: bool,
+    pub api_log: bool,
+}
+
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            diagnostic_log: false,
+            action_log: false,
+            trade_log: true,
+            print_statements: true,
+            api_log: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub host: String,
     pub platform: BrokerPlatform,
@@ -252,6 +273,7 @@ pub struct AppConfig {
     pub allocation: AllocationConfig,
     pub performance: PerformanceConfig,
     pub execution: ExecutionTuningConfig,
+    pub logs: LogsConfig,
 }
 
 impl AppConfig {
@@ -370,6 +392,11 @@ struct ConfigOverrides {
     auto_reprice: Option<bool>,
     reprice_attempts: Option<usize>,
     reprice_wait_seconds: Option<u64>,
+    diagnostic_log: Option<bool>,
+    action_log: Option<bool>,
+    trade_log: Option<bool>,
+    print_statements: Option<bool>,
+    api_log: Option<bool>,
     startup_warnings: Vec<String>,
 }
 
@@ -581,6 +608,17 @@ impl ConfigOverrides {
                 first_optional_env(&["REPRICE_WAIT_SECONDS"]).as_deref(),
                 "REPRICE_WAIT_SECONDS",
             )?,
+            diagnostic_log: parse_optional(
+                first_optional_env(&["DIAGNOSTIC_LOG"]).as_deref(),
+                parse_bool,
+            )?,
+            action_log: parse_optional(first_optional_env(&["ACTION_LOG"]).as_deref(), parse_bool)?,
+            trade_log: parse_optional(first_optional_env(&["TRADE_LOG"]).as_deref(), parse_bool)?,
+            print_statements: parse_optional(
+                first_optional_env(&["PRINT_STATEMENTS"]).as_deref(),
+                parse_bool,
+            )?,
+            api_log: parse_optional(first_optional_env(&["API_LOG"]).as_deref(), parse_bool)?,
             startup_warnings,
         })
     }
@@ -671,6 +709,11 @@ impl ConfigOverrides {
         self.reprice_wait_seconds = higher
             .reprice_wait_seconds
             .or(self.reprice_wait_seconds.take());
+        self.diagnostic_log = higher.diagnostic_log.or(self.diagnostic_log.take());
+        self.action_log = higher.action_log.or(self.action_log.take());
+        self.trade_log = higher.trade_log.or(self.trade_log.take());
+        self.print_statements = higher.print_statements.or(self.print_statements.take());
+        self.api_log = higher.api_log.or(self.api_log.take());
         self.startup_warnings.extend(higher.startup_warnings);
     }
 
@@ -680,6 +723,7 @@ impl ConfigOverrides {
         let allocation_defaults = AllocationConfig::default();
         let performance_defaults = PerformanceConfig::default();
         let execution_defaults = ExecutionTuningConfig::default();
+        let logs_defaults = LogsConfig::default();
 
         let host = self.host.unwrap_or_else(|| "127.0.0.1".to_string());
         let mode = self.mode.unwrap_or(RuntimeMode::Paper);
@@ -833,6 +877,15 @@ impl ConfigOverrides {
                     .reprice_wait_seconds
                     .unwrap_or(execution_defaults.reprice_wait_seconds),
             },
+            logs: LogsConfig {
+                diagnostic_log: self.diagnostic_log.unwrap_or(logs_defaults.diagnostic_log),
+                action_log: self.action_log.unwrap_or(logs_defaults.action_log),
+                trade_log: self.trade_log.unwrap_or(logs_defaults.trade_log),
+                print_statements: self
+                    .print_statements
+                    .unwrap_or(logs_defaults.print_statements),
+                api_log: self.api_log.unwrap_or(logs_defaults.api_log),
+            },
         })
     }
 }
@@ -899,6 +952,7 @@ struct FileConfig {
     allocation: Option<AllocationSection>,
     performance: Option<PerformanceSection>,
     execution: Option<ExecutionSection>,
+    logs: Option<LogsSection>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -978,6 +1032,16 @@ struct ExecutionSection {
     min_buying_power_buffer_ratio: Option<f64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct LogsSection {
+    diagnostic_log: Option<bool>,
+    action_log: Option<bool>,
+    trade_log: Option<bool>,
+    print_statements: Option<bool>,
+    #[serde(rename = "API_log", alias = "api_log")]
+    api_log: Option<bool>,
+}
+
 impl FileConfig {
     fn into_overrides(self) -> Result<ConfigOverrides> {
         let broker = self.broker.unwrap_or_default();
@@ -986,6 +1050,7 @@ impl FileConfig {
         let allocation = self.allocation.unwrap_or_default();
         let performance = self.performance.unwrap_or_default();
         let execution = self.execution.unwrap_or_default();
+        let logs = self.logs.unwrap_or_default();
         let mut startup_warnings = Vec::new();
 
         Ok(ConfigOverrides {
@@ -1132,6 +1197,11 @@ impl FileConfig {
             auto_reprice: execution.auto_reprice,
             reprice_attempts: execution.reprice_attempts,
             reprice_wait_seconds: execution.reprice_wait_seconds,
+            diagnostic_log: logs.diagnostic_log,
+            action_log: logs.action_log,
+            trade_log: logs.trade_log,
+            print_statements: logs.print_statements,
+            api_log: logs.api_log,
             startup_warnings,
         })
     }
@@ -1306,7 +1376,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AppConfig, BrokerPlatform, CapitalSource, MarketDataMode, RunMode, RuntimeMode,
+        AppConfig, BrokerPlatform, CapitalSource, LogsConfig, MarketDataMode, RunMode, RuntimeMode,
         normalize_expiry_values, parse_bool, parse_symbols,
     };
 
@@ -1374,6 +1444,11 @@ mod tests {
             "AUTO_REPRICE",
             "REPRICE_ATTEMPTS",
             "REPRICE_WAIT_SECONDS",
+            "DIAGNOSTIC_LOG",
+            "ACTION_LOG",
+            "TRADE_LOG",
+            "PRINT_STATEMENTS",
+            "API_LOG",
         ] {
             unsafe {
                 std::env::remove_var(key);
@@ -1549,6 +1624,7 @@ expiration_dates = ["20260515"]
         assert_eq!(config.strategy.min_expiration_profit_per_share, 0.05);
         assert_eq!(config.strategy.min_expiration_yield_ratio, 0.01);
         assert_eq!(config.strategy.min_downside_buffer_ratio, 0.10);
+        assert_eq!(config.logs, LogsConfig::default());
 
         std::fs::remove_file(path).unwrap();
         clear_env();

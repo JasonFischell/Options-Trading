@@ -104,14 +104,14 @@ struct OptionResolutionCandidate {
     multiplier: String,
 }
 
-pub async fn log_server_time(client: &Client) -> Result<()> {
+pub async fn log_server_time(client: &Client) -> Result<String> {
     let server_time = client
         .server_time()
         .await
         .context("connected to IBKR but failed to request server time")?;
 
-    println!("Connected to IBKR, server time is {}.", server_time);
-    Ok(())
+    info!(server_time = %server_time, "connected to IBKR and received server time");
+    Ok(server_time.to_string())
 }
 
 pub async fn connect(endpoint: &str, client_id: i32) -> Result<Client> {
@@ -1223,8 +1223,8 @@ mod tests {
         parse_beta_from_fundamental_ratios, select_buy_write_contracts,
     };
     use crate::config::{
-        AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, MarketDataMode,
-        PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
+        AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
+        MarketDataMode, PerformanceConfig, RiskConfig, RunMode, RuntimeMode, StrategyConfig,
     };
     use ibapi::accounts::AccountSummaryTags;
 
@@ -1265,6 +1265,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let selected = select_buy_write_contracts("PTON", &chains, 5.4, &config).unwrap();
@@ -1313,6 +1314,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let selected = select_buy_write_contracts("MARA", &chains, 6.0, &config).unwrap();
@@ -1371,6 +1373,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let selected = select_buy_write_contracts("AAPL", &chains, 120.0, &config).unwrap();
@@ -1482,6 +1485,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let selected = select_buy_write_contracts("AAPL", &chains, 100.0, &config).unwrap();
@@ -1537,6 +1541,7 @@ mod tests {
             allocation: AllocationConfig::default(),
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
+            logs: LogsConfig::default(),
         };
 
         let selected = select_buy_write_contracts("OPEN", &chains, 5.9, &config).unwrap();
