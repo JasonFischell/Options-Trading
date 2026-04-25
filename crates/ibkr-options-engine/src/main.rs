@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use dotenvy::dotenv;
 use ibkr_options_engine::{
@@ -19,6 +19,7 @@ use ibkr_options_engine::{
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
 };
+use std::io::{self, Write};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -37,6 +38,7 @@ async fn main() -> Result<()> {
 async fn run_scan(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::from_path(args.config.as_deref())?;
     print_preflight_messages(&config);
+    confirm_live_trading_intent(&config)?;
     let universe = load_universe(&config)?;
     let symbols = universe
         .iter()
@@ -142,6 +144,7 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
 async fn run_status(args: ConfigArgs) -> Result<()> {
     let config = AppConfig::from_path(args.config.as_deref())?;
     print_preflight_messages(&config);
+    confirm_live_trading_intent(&config)?;
 
     if !config.connect_on_start {
         if config.logs.print_statements {
@@ -256,5 +259,39 @@ fn print_preflight_messages(config: &AppConfig) {
         println!(
             "WARN: paper submission requires live market data; delayed or frozen symbols will be blocked."
         );
+    }
+}
+
+fn confirm_live_trading_intent(config: &AppConfig) -> Result<()> {
+    if !(config.risk.enable_live_orders || matches!(config.mode, RuntimeMode::Live)) {
+        return Ok(());
+    }
+
+    print!("Do you want to enable trading with live funds? Type Y / N: ");
+    io::stdout().flush()?;
+
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    if confirm_live_trading_intent_response(&response) {
+        Ok(())
+    } else {
+        bail!("aborted because live-funds trading was not confirmed")
+    }
+}
+
+fn confirm_live_trading_intent_response(response: &str) -> bool {
+    response.trim().eq_ignore_ascii_case("Y")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirm_live_trading_intent_response;
+
+    #[test]
+    fn accepts_live_trading_confirmation_only_for_y() {
+        assert!(confirm_live_trading_intent_response("Y"));
+        assert!(confirm_live_trading_intent_response(" y "));
+        assert!(!confirm_live_trading_intent_response("N"));
+        assert!(!confirm_live_trading_intent_response(""));
     }
 }
