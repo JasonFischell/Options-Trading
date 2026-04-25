@@ -210,7 +210,7 @@ where
     while let Some(result) = snapshot_stream.next().await {
         completed_symbol_requests += 1;
         if config.logs.print_statements
-            && completed_symbol_requests % 10 == 0
+            && completed_symbol_requests.is_multiple_of(10)
             && completed_symbol_requests < total_symbols
         {
             let next_batch_start = completed_symbol_requests + 1;

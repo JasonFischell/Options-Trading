@@ -585,13 +585,12 @@ fn render_lifecycle_order_ids(lifecycle: &PaperTradeLifecycleRecord) -> String {
     if let Some(order_id) = lifecycle.stock_order_id {
         order_ids.push(order_id.to_string());
     }
-    if let Some(order_id) = lifecycle.short_call_order_id {
-        if !order_ids
+    if let Some(order_id) = lifecycle.short_call_order_id
+        && !order_ids
             .iter()
             .any(|existing| existing == &order_id.to_string())
-        {
-            order_ids.push(order_id.to_string());
-        }
+    {
+        order_ids.push(order_id.to_string());
     }
 
     if order_ids.is_empty() {
