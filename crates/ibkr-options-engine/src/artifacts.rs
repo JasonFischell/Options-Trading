@@ -23,7 +23,7 @@ pub fn logs_subdir(name: &str) -> PathBuf {
 }
 
 pub fn timestamped_log_path(name: &str, file_stem: &str, extension: &str) -> PathBuf {
-    timestamped_log_path_in(&docs_dir(), name, file_stem, extension)
+    timestamped_log_path_in(&logs_dir(), name, file_stem, extension)
 }
 
 pub fn timestamped_log_path_in(
@@ -33,8 +33,8 @@ pub fn timestamped_log_path_in(
     extension: &str,
 ) -> PathBuf {
     root.join(name).join(format!(
-        "{}{}_log.{}",
-        Local::now().format("%Y%m%d%H%M%S"),
+        "{}_{}_Log.{}",
+        Local::now().format("%Y%m%d-%H-%M-%S"),
         file_stem,
         extension
     ))

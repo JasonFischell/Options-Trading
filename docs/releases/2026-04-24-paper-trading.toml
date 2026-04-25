@@ -7,8 +7,6 @@ account = "DUQ212633"
 runtime_mode = "paper"
 read_only = false
 connect_on_start = true
-run_mode = "scheduled"
-scan_schedule = "0 45 9,12,15 * * MON-FRI"
 market_data_mode = "live"
 
 [universe]

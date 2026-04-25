@@ -15,7 +15,7 @@ use serde::Serialize;
 use tokio::time::{Duration, timeout};
 
 use crate::{
-    artifacts::{docs_dir, timestamped_log_path_in},
+    artifacts::{logs_dir, timestamped_log_path_in},
     config::{AppConfig, RuntimeMode},
     models::{
         BrokerEventTimelineEntry, ExecutionLegRecord, ExecutionRecord, ExecutionStepTiming,
@@ -695,7 +695,7 @@ fn persist_broker_event_log(
     order_id: i32,
     events: &[TimedBrokerOrderEvent],
 ) -> Result<std::path::PathBuf> {
-    let path = timestamped_log_path_in(&docs_dir(), "API", "API", "json");
+    let path = timestamped_log_path_in(&logs_dir(), "api", "API", "json");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .context("failed to create logs directory for broker event logs")?;

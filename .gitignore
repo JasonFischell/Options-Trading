@@ -12,8 +12,11 @@ env/
 
 # Local outputs
 *.log
-logs/**/*.json
-logs/**/*.txt
+logs/
+docs/diagnostic/
+docs/action/
+docs/trades/
+docs/API/
 *.tmp
 *.bak
 Sorted_Options_List.csv
@@ -27,7 +30,6 @@ target-*/
 secrets/
 *.local.toml
 docs/local/*
-crates/ibkr-options-engine/logs/ibkr-order-events-*.json
 */docs/Trades_Executed*
 
 # OS / editors

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 
 use crate::{
-    artifacts::{docs_dir, timestamped_log_path_in},
+    artifacts::{logs_dir, timestamped_log_path_in},
     config::AppConfig,
     models::{
         CycleReport, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, OrderIntent,
@@ -19,7 +19,7 @@ use crate::{
 const DIAGNOSTIC_LOG_DIR: &str = "diagnostic";
 const ACTION_LOG_DIR: &str = "action";
 const TRADE_LOG_DIR: &str = "trades";
-const API_LOG_DIR: &str = "API";
+const API_LOG_DIR: &str = "api";
 
 #[derive(Debug, Default, Clone)]
 pub struct OutputArtifacts {
@@ -49,7 +49,7 @@ impl OutputArtifacts {
 }
 
 pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<OutputArtifacts> {
-    write_cycle_outputs_in(&docs_dir(), config, report)
+    write_cycle_outputs_in(&logs_dir(), config, report)
 }
 
 fn write_cycle_outputs_in(
@@ -60,12 +60,12 @@ fn write_cycle_outputs_in(
     let mut outputs = OutputArtifacts::default();
 
     if config.logs.diagnostic_log {
-        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "diagnostic", "json");
+        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "Diagnostic", "json");
         write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
         outputs.diagnostic_log_path = Some(path);
     }
     if config.logs.action_log {
-        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "action", "log");
+        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "Action", "txt");
         write_log_file(&path, &render_cycle_action_log(report))?;
         outputs.action_log_path = Some(path);
     }
@@ -75,7 +75,7 @@ fn write_cycle_outputs_in(
         outputs.trade_log_path = Some(path);
     }
     if config.logs.api_log {
-        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "log");
+        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "txt");
         write_log_file(&path, &render_cycle_api_log(config, report))?;
         outputs.api_log_path = Some(path);
     }
@@ -84,7 +84,7 @@ fn write_cycle_outputs_in(
 }
 
 pub fn write_status_outputs(config: &AppConfig, report: &StatusReport) -> Result<OutputArtifacts> {
-    write_status_outputs_in(&docs_dir(), config, report)
+    write_status_outputs_in(&logs_dir(), config, report)
 }
 
 fn write_status_outputs_in(
@@ -95,17 +95,17 @@ fn write_status_outputs_in(
     let mut outputs = OutputArtifacts::default();
 
     if config.logs.diagnostic_log {
-        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "diagnostic", "json");
+        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "Diagnostic", "json");
         write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
         outputs.diagnostic_log_path = Some(path);
     }
     if config.logs.action_log {
-        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "action", "log");
+        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "Action", "txt");
         write_log_file(&path, &render_status_action_log(report))?;
         outputs.action_log_path = Some(path);
     }
     if config.logs.api_log {
-        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "log");
+        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "txt");
         write_log_file(&path, &render_status_api_log(config, report))?;
         outputs.api_log_path = Some(path);
     }
@@ -1857,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_output_writes_logs_into_requested_docs_subfolders() {
+    fn cycle_output_writes_logs_into_requested_log_subfolders() {
         let artifact_dir = TestArtifactDir::new("cycle-output");
         let mut config = test_config();
         config.logs.diagnostic_log = true;
@@ -2023,9 +2023,23 @@ mod tests {
         );
         assert!(
             outputs
+                .diagnostic_log_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .is_some_and(|name| name.to_string_lossy().contains("_Diagnostic_Log.json"))
+        );
+        assert!(
+            outputs
                 .action_log_path
                 .as_ref()
                 .is_some_and(|path| path.starts_with(artifact_dir.path().join("action")))
+        );
+        assert!(
+            outputs
+                .action_log_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .is_some_and(|name| name.to_string_lossy().contains("_Action_Log.txt"))
         );
         assert!(
             outputs
@@ -2035,9 +2049,23 @@ mod tests {
         );
         assert!(
             outputs
+                .trade_log_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .is_some_and(|name| name.to_string_lossy().contains("_Trade_Log.txt"))
+        );
+        assert!(
+            outputs
                 .api_log_path
                 .as_ref()
-                .is_some_and(|path| path.starts_with(artifact_dir.path().join("API")))
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("api")))
+        );
+        assert!(
+            outputs
+                .api_log_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .is_some_and(|name| name.to_string_lossy().contains("_API_Log.txt"))
         );
     }
 
