@@ -56,4 +56,4 @@ diagnostic_log = false
 action_log = false
 trade_log = true
 print_statements = true
-API_log = false
+api_log = false

@@ -12,7 +12,10 @@ use ibkr_options_engine::{
     market_data::{IbkrMarketDataProvider, load_universe},
     models::StatusReport,
     paper_state::PaperTradeLedger,
-    reporting::{render_trade_summary, write_cycle_outputs, write_status_outputs},
+    reporting::{
+        render_filled_trade_summary, render_left_open_trade_summary, write_cycle_outputs,
+        write_status_outputs,
+    },
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
 };
@@ -112,10 +115,22 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
         for line in outputs.terminal_lines() {
             println!("{line}");
         }
-        let trade_summaries = render_trade_summary(&report);
-        if !trade_summaries.is_empty() {
-            println!("TRADES PLACED:");
-            for trade in trade_summaries {
+        let filled_trade_summaries = render_filled_trade_summary(&report);
+        let left_open_trade_summaries = render_left_open_trade_summary(&report);
+        println!("Trades executed this run:");
+        println!("FILLED:");
+        if filled_trade_summaries.is_empty() {
+            println!("- none");
+        } else {
+            for trade in filled_trade_summaries {
+                println!("- {trade}");
+            }
+        }
+        println!("LEFT OPEN:");
+        if left_open_trade_summaries.is_empty() {
+            println!("- none");
+        } else {
+            for trade in left_open_trade_summaries {
                 println!("- {trade}");
             }
         }

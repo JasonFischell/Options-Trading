@@ -1,15 +1,24 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
 use crate::{
-    artifacts::timestamped_log_path,
+    artifacts::{docs_dir, timestamped_log_path_in},
     config::AppConfig,
     models::{
         CycleReport, ExecutionLegRecord, ExecutionRecord, FillReconciliationRecord, OrderIntent,
         PaperTradeLifecycleRecord, ScoredOptionCandidate, StatusReport,
     },
 };
+
+const DIAGNOSTIC_LOG_DIR: &str = "diagnostic";
+const ACTION_LOG_DIR: &str = "action";
+const TRADE_LOG_DIR: &str = "trades";
+const API_LOG_DIR: &str = "API";
 
 #[derive(Debug, Default, Clone)]
 pub struct OutputArtifacts {
@@ -39,28 +48,33 @@ impl OutputArtifacts {
 }
 
 pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<OutputArtifacts> {
+    write_cycle_outputs_in(&docs_dir(), config, report)
+}
+
+fn write_cycle_outputs_in(
+    root: &Path,
+    config: &AppConfig,
+    report: &CycleReport,
+) -> Result<OutputArtifacts> {
     let mut outputs = OutputArtifacts::default();
 
     if config.logs.diagnostic_log {
-        let path = timestamped_log_path("diagnostic", "diagnostic", "json");
+        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "diagnostic", "json");
         write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
         outputs.diagnostic_log_path = Some(path);
     }
     if config.logs.action_log {
-        let path = timestamped_log_path("action", "action", "log");
+        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "action", "log");
         write_log_file(&path, &render_cycle_action_log(report))?;
         outputs.action_log_path = Some(path);
     }
     if config.logs.trade_log {
-        let trade_log = render_trade_log(report);
-        if !trade_log.is_empty() {
-            let path = timestamped_log_path("trade", "trade", "log");
-            write_log_file(&path, &trade_log)?;
-            outputs.trade_log_path = Some(path);
-        }
+        let path = timestamped_log_path_in(root, TRADE_LOG_DIR, "trade", "log");
+        write_log_file(&path, &render_trade_log(report))?;
+        outputs.trade_log_path = Some(path);
     }
     if config.logs.api_log {
-        let path = timestamped_log_path("api", "API", "log");
+        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "log");
         write_log_file(&path, &render_cycle_api_log(config, report))?;
         outputs.api_log_path = Some(path);
     }
@@ -69,20 +83,28 @@ pub fn write_cycle_outputs(config: &AppConfig, report: &CycleReport) -> Result<O
 }
 
 pub fn write_status_outputs(config: &AppConfig, report: &StatusReport) -> Result<OutputArtifacts> {
+    write_status_outputs_in(&docs_dir(), config, report)
+}
+
+fn write_status_outputs_in(
+    root: &Path,
+    config: &AppConfig,
+    report: &StatusReport,
+) -> Result<OutputArtifacts> {
     let mut outputs = OutputArtifacts::default();
 
     if config.logs.diagnostic_log {
-        let path = timestamped_log_path("diagnostic", "diagnostic", "json");
+        let path = timestamped_log_path_in(root, DIAGNOSTIC_LOG_DIR, "diagnostic", "json");
         write_log_file(&path, &serde_json::to_string_pretty(report)?)?;
         outputs.diagnostic_log_path = Some(path);
     }
     if config.logs.action_log {
-        let path = timestamped_log_path("action", "action", "log");
+        let path = timestamped_log_path_in(root, ACTION_LOG_DIR, "action", "log");
         write_log_file(&path, &render_status_action_log(report))?;
         outputs.action_log_path = Some(path);
     }
     if config.logs.api_log {
-        let path = timestamped_log_path("api", "API", "log");
+        let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "log");
         write_log_file(&path, &render_status_api_log(config, report))?;
         outputs.api_log_path = Some(path);
     }
@@ -374,53 +396,67 @@ pub fn render_status_log(config: &AppConfig, report: &StatusReport) -> String {
 }
 
 pub fn render_trade_summary(report: &CycleReport) -> Vec<String> {
+    render_current_position_lines(report)
+}
+
+pub fn render_filled_trade_summary(report: &CycleReport) -> Vec<String> {
     report
         .execution_records
         .iter()
-        .filter(|record| {
-            record.submission_mode == "paper"
-                && record.symbol != "N/A"
-                && record.legs.iter().any(|leg| leg.order_id.is_some())
-        })
-        .map(|record| {
-            let stock_leg = record
-                .legs
-                .iter()
-                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Stock);
-            let option_leg = record
-                .legs
-                .iter()
-                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Option);
+        .filter(|record| execution_record_represents_filled_trade(record))
+        .map(render_execution_trade_record)
+        .collect()
+}
+
+pub fn render_left_open_trade_summary(report: &CycleReport) -> Vec<String> {
+    report
+        .execution_records
+        .iter()
+        .filter(|record| execution_record_represents_left_open_trade(record))
+        .map(render_execution_trade_record)
+        .collect()
+}
+
+fn render_current_position_lines(report: &CycleReport) -> Vec<String> {
+    report
+        .paper_trade_lifecycle
+        .iter()
+        .filter(|lifecycle| lifecycle_represents_opened_trade(lifecycle))
+        .map(|lifecycle| {
             format!(
-                "{} | status={} | stock {} @ {} | option {} | order_ids={}",
-                record.symbol,
-                record.status,
-                stock_leg.map(|leg| leg.quantity).unwrap_or_default(),
-                format_optional_price(stock_leg.and_then(|leg| leg.limit_price)),
-                option_leg
-                    .map(render_trade_option_leg)
-                    .unwrap_or_else(|| "n/a".to_string()),
-                record
-                    .legs
-                    .iter()
-                    .filter_map(|leg| leg.order_id)
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "{} | status={} | placed_at={} | stock {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | order_ids={}",
+                lifecycle.symbol,
+                lifecycle.status,
+                lifecycle.first_recorded_at.to_rfc3339(),
+                lifecycle.stock_filled_shares,
+                format_optional_price(lifecycle.stock_average_fill_price),
+                lifecycle.short_call_filled_contracts,
+                format_optional_price(lifecycle.short_call_average_fill_price),
+                lifecycle.observed_stock_shares,
+                lifecycle.observed_short_call_contracts,
+                render_lifecycle_order_ids(lifecycle)
             )
         })
         .collect()
 }
 
 fn render_trade_log(report: &CycleReport) -> String {
-    let summaries = render_trade_summary(report);
-    if summaries.is_empty() {
-        String::new()
-    } else {
-        let mut lines = vec!["Trades Placed".to_string()];
-        lines.extend(summaries.into_iter().map(|line| format!("- {line}")));
-        lines.join("\n")
-    }
+    let filled = render_filled_trade_summary(report);
+    let current_positions = render_trade_summary(report);
+    let mut lines = Vec::new();
+
+    append_section(
+        &mut lines,
+        "Trades Filled this Run",
+        section_lines_or_none(filled),
+    );
+    append_section(
+        &mut lines,
+        "Current Positions (after this run)",
+        section_lines_or_none(current_positions),
+    );
+
+    lines.join("\n")
 }
 
 fn render_cycle_action_log(report: &CycleReport) -> String {
@@ -435,11 +471,12 @@ fn render_cycle_action_log(report: &CycleReport) -> String {
         lines.push("Recorded actions:".to_string());
         lines.extend(report.action_log.iter().map(|entry| format!("- {entry}")));
     }
-    let execution_lines = render_execution_records(&report.execution_records);
-    if !execution_lines.is_empty() {
+
+    let submitted_trade_lines = render_submitted_trade_records(report);
+    if !submitted_trade_lines.is_empty() {
         lines.push(String::new());
-        lines.push("Execution records:".to_string());
-        lines.extend(execution_lines);
+        lines.push("Submitted trade records:".to_string());
+        lines.extend(submitted_trade_lines);
     }
     lines.join("\n")
 }
@@ -505,7 +542,154 @@ fn render_status_api_log(config: &AppConfig, report: &StatusReport) -> String {
     lines.join("\n")
 }
 
-fn render_trade_option_leg(leg: &ExecutionLegRecord) -> String {
+fn lifecycle_represents_opened_trade(lifecycle: &PaperTradeLifecycleRecord) -> bool {
+    lifecycle.stock_filled_shares > 0.0
+        || lifecycle.short_call_filled_contracts > 0.0
+        || lifecycle.observed_stock_shares > 0.0
+        || lifecycle.observed_short_call_contracts > 0.0
+        || matches!(
+            lifecycle.status.as_str(),
+            "filled" | "open-covered-call" | "long-stock-awaiting-short-call"
+        )
+}
+
+fn execution_record_represents_filled_trade(record: &ExecutionRecord) -> bool {
+    record.submission_mode == "paper"
+        && record.symbol != "N/A"
+        && record.fill_reconciliation.as_ref().is_some_and(|fill| {
+            fill.stock_filled_shares > 0.0 && fill.short_call_filled_contracts > 0.0
+        })
+}
+
+fn execution_record_represents_left_open_trade(record: &ExecutionRecord) -> bool {
+    record.submission_mode == "paper"
+        && record.symbol != "N/A"
+        && record.legs.iter().any(|leg| leg.order_id.is_some())
+        && !execution_record_represents_filled_trade(record)
+}
+
+fn render_lifecycle_order_ids(lifecycle: &PaperTradeLifecycleRecord) -> String {
+    let mut order_ids = Vec::new();
+    if let Some(order_id) = lifecycle.stock_order_id {
+        order_ids.push(order_id.to_string());
+    }
+    if let Some(order_id) = lifecycle.short_call_order_id {
+        if !order_ids
+            .iter()
+            .any(|existing| existing == &order_id.to_string())
+        {
+            order_ids.push(order_id.to_string());
+        }
+    }
+
+    if order_ids.is_empty() {
+        "n/a".to_string()
+    } else {
+        order_ids.join(", ")
+    }
+}
+
+fn render_submitted_trade_records(report: &CycleReport) -> Vec<String> {
+    report
+        .execution_records
+        .iter()
+        .filter(|record| {
+            record.submission_mode == "paper"
+                && record.symbol != "N/A"
+                && record.legs.iter().any(|leg| leg.order_id.is_some())
+        })
+        .map(|record| {
+            let stock_leg = record
+                .legs
+                .iter()
+                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Stock);
+            let option_leg = record
+                .legs
+                .iter()
+                .find(|leg| leg.instrument_type == crate::models::InstrumentType::Option);
+            format!(
+                "- {} | status={} | stock {} @ {} | option {} | order_ids={}",
+                record.symbol,
+                record.status,
+                stock_leg.map(|leg| leg.quantity).unwrap_or_default(),
+                format_optional_price(stock_leg.and_then(|leg| leg.limit_price)),
+                option_leg
+                    .map(render_submitted_trade_option_leg)
+                    .unwrap_or_else(|| "n/a".to_string()),
+                record
+                    .legs
+                    .iter()
+                    .filter_map(|leg| leg.order_id)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect()
+}
+
+fn render_execution_trade_record(record: &ExecutionRecord) -> String {
+    let stock_leg = record
+        .legs
+        .iter()
+        .find(|leg| leg.instrument_type == crate::models::InstrumentType::Stock);
+    let option_leg = record
+        .legs
+        .iter()
+        .find(|leg| leg.instrument_type == crate::models::InstrumentType::Option);
+
+    let stock_quantity = stock_leg
+        .map(|leg| {
+            if leg.filled_quantity > 0.0 {
+                format!("{:.0}", leg.filled_quantity)
+            } else {
+                leg.quantity.to_string()
+            }
+        })
+        .unwrap_or_else(|| "0".to_string());
+    let stock_price = stock_leg.and_then(|leg| leg.average_fill_price.or(leg.limit_price));
+    let option_price = option_leg.and_then(|leg| leg.average_fill_price.or(leg.limit_price));
+
+    format!(
+        "{} | status={} | stock {} @ {} | option {} | order_ids={}",
+        record.symbol,
+        record.status,
+        stock_quantity,
+        format_optional_price(stock_price),
+        option_leg
+            .map(|leg| {
+                let quantity = if leg.filled_quantity > 0.0 {
+                    format!("{:.0}", leg.filled_quantity)
+                } else {
+                    leg.quantity.to_string()
+                };
+                format!(
+                    "{} x{} @ {}",
+                    leg.leg_symbol,
+                    quantity,
+                    format_optional_price(option_price)
+                )
+            })
+            .unwrap_or_else(|| "n/a".to_string()),
+        record
+            .legs
+            .iter()
+            .filter_map(|leg| leg.order_id)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn section_lines_or_none(lines: Vec<String>) -> Vec<String> {
+    if lines.is_empty() {
+        vec!["- none".to_string()]
+    } else {
+        lines.into_iter().map(|line| format!("- {line}")).collect()
+    }
+}
+
+fn render_submitted_trade_option_leg(leg: &ExecutionLegRecord) -> String {
     format!(
         "{} x{} @ {}",
         leg.leg_symbol,
@@ -979,9 +1163,14 @@ fn format_optional_price(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use chrono::Utc;
 
-    use super::{render_human_log, render_status_log};
+    use super::{
+        render_cycle_action_log, render_human_log, render_status_log, render_trade_log,
+        write_cycle_outputs_in, write_status_outputs_in,
+    };
     use crate::{
         config::{
             AllocationConfig, AppConfig, BrokerPlatform, ExecutionTuningConfig, LogsConfig,
@@ -1018,6 +1207,34 @@ mod tests {
             performance: PerformanceConfig::default(),
             execution: ExecutionTuningConfig::default(),
             logs: LogsConfig::default(),
+        }
+    }
+
+    struct TestArtifactDir {
+        path: PathBuf,
+    }
+
+    impl TestArtifactDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "options-trading-reporting-tests-{name}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestArtifactDir {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                let _ = fs::remove_dir_all(&self.path);
+            }
         }
     }
 
@@ -1240,6 +1457,289 @@ mod tests {
     }
 
     #[test]
+    fn trade_log_only_includes_opened_or_filled_trades() {
+        let report = CycleReport {
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            run_mode: "Manual".to_string(),
+            schedule: "manual".to_string(),
+            market_data_mode: "Live".to_string(),
+            account_state: AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(10_000.0),
+                buying_power: Some(20_000.0),
+                net_liquidation: Some(10_500.0),
+            },
+            universe_size: 1,
+            symbols_scanned: 1,
+            underlying_snapshots: 1,
+            option_quotes_considered: 1,
+            candidates_ranked: 0,
+            accepted_candidates: Vec::new(),
+            guardrail_rejections: Vec::new(),
+            proposed_orders: Vec::new(),
+            execution_records: vec![ExecutionRecord {
+                symbol: "AAPL".to_string(),
+                status: "combo-submitted".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "submitted combo order".to_string(),
+                legs: vec![ExecutionLegRecord {
+                    leg_symbol: "AAPL".to_string(),
+                    instrument_type: InstrumentType::Stock,
+                    action: TradeAction::Buy,
+                    quantity: 100,
+                    order_id: Some(10),
+                    submission_status: "Submitted".to_string(),
+                    limit_price: Some(100.25),
+                    filled_quantity: 0.0,
+                    average_fill_price: None,
+                    execution_ids: Vec::new(),
+                    note: "awaiting fill".to_string(),
+                }],
+                fill_reconciliation: None,
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
+            }],
+            open_positions: Vec::new(),
+            paper_trade_lifecycle: vec![
+                PaperTradeLifecycleRecord {
+                    symbol: "AAPL".to_string(),
+                    intent_key: "aapl".to_string(),
+                    status: "combo-submitted".to_string(),
+                    first_recorded_at: Utc::now(),
+                    last_updated_at: Utc::now(),
+                    hold_until_close: true,
+                    stock_order_id: Some(10),
+                    short_call_order_id: Some(10),
+                    stock_filled_shares: 0.0,
+                    short_call_filled_contracts: 0.0,
+                    stock_average_fill_price: None,
+                    short_call_average_fill_price: None,
+                    observed_stock_shares: 0.0,
+                    observed_short_call_contracts: 0.0,
+                    note: "awaiting fill".to_string(),
+                },
+                PaperTradeLifecycleRecord {
+                    symbol: "MSFT".to_string(),
+                    intent_key: "msft".to_string(),
+                    status: "open-covered-call".to_string(),
+                    first_recorded_at: Utc::now(),
+                    last_updated_at: Utc::now(),
+                    hold_until_close: true,
+                    stock_order_id: Some(11),
+                    short_call_order_id: Some(11),
+                    stock_filled_shares: 100.0,
+                    short_call_filled_contracts: 1.0,
+                    stock_average_fill_price: Some(95.0),
+                    short_call_average_fill_price: Some(6.5),
+                    observed_stock_shares: 100.0,
+                    observed_short_call_contracts: 1.0,
+                    note: "opened".to_string(),
+                },
+            ],
+            live_data_requested: true,
+            non_live_symbols: Vec::new(),
+            capital_source_details: CapitalSourceDetails {
+                configured_source: "available_funds".to_string(),
+                preview: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+                routed_orders: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+            },
+            allocation_summary: AllocationSummary {
+                candidate_symbols_considered: 0,
+                selected_symbols: 0,
+                total_lots: 0,
+                existing_exposure_cash: 0.0,
+                allocated_cash: 0.0,
+                remaining_cash: 10_000.0,
+            },
+            warnings: Vec::new(),
+            diagnostic_log: Vec::new(),
+            action_log: Vec::new(),
+            api_log: Vec::new(),
+            timing_metrics: CycleTimingMetrics {
+                total_elapsed_ms: 1,
+                market_data_elapsed_ms: 1,
+            },
+            throughput_counters: CycleThroughputCounters {
+                configured_symbol_concurrency: 1,
+                configured_option_quote_concurrency_per_symbol: 1,
+                symbols_completed: 1,
+                underlying_snapshots_completed: 1,
+                option_quotes_completed: 1,
+                symbols_per_second: 1.0,
+                underlying_snapshots_per_second: 1.0,
+                option_quotes_per_second: 1.0,
+            },
+            human_log_path: None,
+            notes: Vec::new(),
+        };
+
+        let trade_log = render_trade_log(&report);
+
+        assert!(trade_log.contains("Trades Filled this Run:"));
+        assert!(trade_log.contains("- none"));
+        assert!(trade_log.contains("Current Positions (after this run):"));
+        assert!(trade_log.contains("MSFT | status=open-covered-call"));
+        assert!(trade_log.contains("placed_at="));
+        assert!(!trade_log.contains("AAPL | status=combo-submitted"));
+    }
+
+    #[test]
+    fn action_log_includes_submitted_trade_records_even_when_not_filled() {
+        let report = CycleReport {
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            run_mode: "Manual".to_string(),
+            schedule: "manual".to_string(),
+            market_data_mode: "Live".to_string(),
+            account_state: AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(10_000.0),
+                buying_power: Some(20_000.0),
+                net_liquidation: Some(10_500.0),
+            },
+            universe_size: 1,
+            symbols_scanned: 1,
+            underlying_snapshots: 1,
+            option_quotes_considered: 1,
+            candidates_ranked: 0,
+            accepted_candidates: Vec::new(),
+            guardrail_rejections: Vec::new(),
+            proposed_orders: Vec::new(),
+            execution_records: vec![ExecutionRecord {
+                symbol: "AAPL".to_string(),
+                status: "combo-submitted".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "submitted combo order".to_string(),
+                legs: vec![
+                    ExecutionLegRecord {
+                        leg_symbol: "AAPL".to_string(),
+                        instrument_type: InstrumentType::Stock,
+                        action: TradeAction::Buy,
+                        quantity: 100,
+                        order_id: Some(10),
+                        submission_status: "Submitted".to_string(),
+                        limit_price: Some(100.25),
+                        filled_quantity: 0.0,
+                        average_fill_price: None,
+                        execution_ids: Vec::new(),
+                        note: "awaiting fill".to_string(),
+                    },
+                    ExecutionLegRecord {
+                        leg_symbol: "AAPL".to_string(),
+                        instrument_type: InstrumentType::Option,
+                        action: TradeAction::Sell,
+                        quantity: 1,
+                        order_id: Some(10),
+                        submission_status: "Submitted".to_string(),
+                        limit_price: Some(11.0),
+                        filled_quantity: 0.0,
+                        average_fill_price: None,
+                        execution_ids: Vec::new(),
+                        note: "awaiting fill".to_string(),
+                    },
+                ],
+                fill_reconciliation: Some(FillReconciliationRecord {
+                    stock_filled_shares: 0.0,
+                    stock_average_fill_price: None,
+                    short_call_filled_contracts: 0.0,
+                    short_call_average_fill_price: None,
+                    total_commission: None,
+                    eligible_for_short_call: false,
+                    uncovered_shares: 0.0,
+                    status: "combo-submitted".to_string(),
+                    note: "awaiting synchronized fill".to_string(),
+                }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
+            }],
+            open_positions: Vec::new(),
+            paper_trade_lifecycle: Vec::new(),
+            live_data_requested: true,
+            non_live_symbols: Vec::new(),
+            capital_source_details: CapitalSourceDetails {
+                configured_source: "available_funds".to_string(),
+                preview: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+                routed_orders: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+            },
+            allocation_summary: AllocationSummary {
+                candidate_symbols_considered: 0,
+                selected_symbols: 0,
+                total_lots: 0,
+                existing_exposure_cash: 0.0,
+                allocated_cash: 0.0,
+                remaining_cash: 10_000.0,
+            },
+            warnings: Vec::new(),
+            diagnostic_log: Vec::new(),
+            action_log: vec![
+                "AAPL: blocked duplicate paper submission for prior intent.".to_string(),
+            ],
+            api_log: Vec::new(),
+            timing_metrics: CycleTimingMetrics {
+                total_elapsed_ms: 1,
+                market_data_elapsed_ms: 1,
+            },
+            throughput_counters: CycleThroughputCounters {
+                configured_symbol_concurrency: 1,
+                configured_option_quote_concurrency_per_symbol: 1,
+                symbols_completed: 1,
+                underlying_snapshots_completed: 1,
+                option_quotes_completed: 1,
+                symbols_per_second: 1.0,
+                underlying_snapshots_per_second: 1.0,
+                option_quotes_per_second: 1.0,
+            },
+            human_log_path: None,
+            notes: Vec::new(),
+        };
+
+        let action_log = render_cycle_action_log(&report);
+
+        assert!(action_log.contains("Recorded actions:"));
+        assert!(action_log.contains("Submitted trade records:"));
+        assert!(action_log.contains("AAPL | status=combo-submitted"));
+    }
+
+    #[test]
     fn status_log_surfaces_at_a_glance_rollups_and_ledger() {
         let report = StatusReport {
             account: "DU1234567".to_string(),
@@ -1324,5 +1824,233 @@ mod tests {
         assert!(log.contains("Ledger statuses: open-covered-call=1"));
         assert!(log.contains("Paper Lifecycle Ledger:"));
         assert!(log.contains("Recent Completed Orders:"));
+    }
+
+    #[test]
+    fn cycle_output_writes_logs_into_requested_docs_subfolders() {
+        let artifact_dir = TestArtifactDir::new("cycle-output");
+        let mut config = test_config();
+        config.logs.diagnostic_log = true;
+        config.logs.action_log = true;
+        config.logs.trade_log = true;
+        config.logs.api_log = true;
+
+        let report = CycleReport {
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            run_mode: "Manual".to_string(),
+            schedule: "manual".to_string(),
+            market_data_mode: "Live".to_string(),
+            account_state: AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(10_000.0),
+                buying_power: Some(20_000.0),
+                net_liquidation: Some(10_500.0),
+            },
+            universe_size: 1,
+            symbols_scanned: 1,
+            underlying_snapshots: 1,
+            option_quotes_considered: 1,
+            candidates_ranked: 1,
+            accepted_candidates: Vec::new(),
+            guardrail_rejections: Vec::new(),
+            proposed_orders: Vec::new(),
+            execution_records: vec![ExecutionRecord {
+                symbol: "MSFT".to_string(),
+                status: "deep-itm-covered-call-open".to_string(),
+                submission_mode: "paper".to_string(),
+                note: "filled".to_string(),
+                legs: vec![
+                    ExecutionLegRecord {
+                        leg_symbol: "MSFT".to_string(),
+                        instrument_type: InstrumentType::Stock,
+                        action: TradeAction::Buy,
+                        quantity: 100,
+                        order_id: Some(11),
+                        submission_status: "Filled".to_string(),
+                        limit_price: Some(95.0),
+                        filled_quantity: 100.0,
+                        average_fill_price: Some(95.0),
+                        execution_ids: vec!["stock-fill".to_string()],
+                        note: "filled".to_string(),
+                    },
+                    ExecutionLegRecord {
+                        leg_symbol: "MSFT 20260515 90 C".to_string(),
+                        instrument_type: InstrumentType::Option,
+                        action: TradeAction::Sell,
+                        quantity: 1,
+                        order_id: Some(11),
+                        submission_status: "Filled".to_string(),
+                        limit_price: Some(6.5),
+                        filled_quantity: 1.0,
+                        average_fill_price: Some(6.5),
+                        execution_ids: vec!["option-fill".to_string()],
+                        note: "filled".to_string(),
+                    },
+                ],
+                fill_reconciliation: Some(FillReconciliationRecord {
+                    stock_filled_shares: 100.0,
+                    stock_average_fill_price: Some(95.0),
+                    short_call_filled_contracts: 1.0,
+                    short_call_average_fill_price: Some(6.5),
+                    total_commission: Some(1.9),
+                    eligible_for_short_call: false,
+                    uncovered_shares: 0.0,
+                    status: "deep-itm-covered-call-open".to_string(),
+                    note: "filled".to_string(),
+                }),
+                broker_event_log_path: None,
+                broker_event_timeline: Vec::new(),
+                execution_step_timings: Vec::new(),
+            }],
+            open_positions: vec![OpenPositionState {
+                symbol: "MSFT".to_string(),
+                stock_shares: 100.0,
+                short_call_contracts: 1.0,
+                average_stock_cost: Some(95.0),
+            }],
+            paper_trade_lifecycle: vec![PaperTradeLifecycleRecord {
+                symbol: "MSFT".to_string(),
+                intent_key: "msft".to_string(),
+                status: "open-covered-call".to_string(),
+                first_recorded_at: Utc::now(),
+                last_updated_at: Utc::now(),
+                hold_until_close: true,
+                stock_order_id: Some(11),
+                short_call_order_id: Some(11),
+                stock_filled_shares: 100.0,
+                short_call_filled_contracts: 1.0,
+                stock_average_fill_price: Some(95.0),
+                short_call_average_fill_price: Some(6.5),
+                observed_stock_shares: 100.0,
+                observed_short_call_contracts: 1.0,
+                note: "opened".to_string(),
+            }],
+            live_data_requested: true,
+            non_live_symbols: Vec::new(),
+            capital_source_details: CapitalSourceDetails {
+                configured_source: "available_funds".to_string(),
+                preview: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+                routed_orders: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+            },
+            allocation_summary: AllocationSummary {
+                candidate_symbols_considered: 1,
+                selected_symbols: 1,
+                total_lots: 1,
+                existing_exposure_cash: 0.0,
+                allocated_cash: 9_500.0,
+                remaining_cash: 500.0,
+            },
+            warnings: Vec::new(),
+            diagnostic_log: vec!["diagnostic".to_string()],
+            action_log: vec!["action".to_string()],
+            api_log: vec!["api".to_string()],
+            timing_metrics: CycleTimingMetrics {
+                total_elapsed_ms: 1,
+                market_data_elapsed_ms: 1,
+            },
+            throughput_counters: CycleThroughputCounters {
+                configured_symbol_concurrency: 1,
+                configured_option_quote_concurrency_per_symbol: 1,
+                symbols_completed: 1,
+                underlying_snapshots_completed: 1,
+                option_quotes_completed: 1,
+                symbols_per_second: 1.0,
+                underlying_snapshots_per_second: 1.0,
+                option_quotes_per_second: 1.0,
+            },
+            human_log_path: None,
+            notes: Vec::new(),
+        };
+
+        let outputs = write_cycle_outputs_in(artifact_dir.path(), &config, &report).unwrap();
+
+        assert!(
+            outputs
+                .diagnostic_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("diagnostic")))
+        );
+        assert!(
+            outputs
+                .action_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("action")))
+        );
+        assert!(
+            outputs
+                .trade_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("trades")))
+        );
+        assert!(
+            outputs
+                .api_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("API")))
+        );
+    }
+
+    #[test]
+    fn status_output_only_writes_enabled_log_types() {
+        let artifact_dir = TestArtifactDir::new("status-output");
+        let mut config = test_config();
+        config.logs.diagnostic_log = false;
+        config.logs.action_log = true;
+        config.logs.trade_log = false;
+        config.logs.api_log = false;
+
+        let report = StatusReport {
+            account: "DU1234567".to_string(),
+            endpoint: "127.0.0.1:4002".to_string(),
+            platform: "IB Gateway".to_string(),
+            runtime_mode: "Paper".to_string(),
+            connect_on_start: true,
+            account_state: AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(12_500.0),
+                buying_power: Some(25_000.0),
+                net_liquidation: Some(18_000.0),
+            },
+            capital_source: "available_funds".to_string(),
+            deployment_budget: 10_000.0,
+            open_orders: Vec::new(),
+            completed_orders: Vec::new(),
+            open_positions: Vec::new(),
+            paper_trade_lifecycle: Vec::new(),
+            diagnostic_log: vec!["status diagnostic".to_string()],
+            action_log: vec!["status action".to_string()],
+            api_log: vec!["status api".to_string()],
+        };
+
+        let outputs = write_status_outputs_in(artifact_dir.path(), &config, &report).unwrap();
+
+        assert!(outputs.diagnostic_log_path.is_none());
+        assert!(outputs.trade_log_path.is_none());
+        assert!(outputs.api_log_path.is_none());
+        assert!(
+            outputs
+                .action_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("action")))
+        );
     }
 }

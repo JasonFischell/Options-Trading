@@ -1629,4 +1629,70 @@ expiration_dates = ["20260515"]
         std::fs::remove_file(path).unwrap();
         clear_env();
     }
+
+    #[test]
+    fn file_logs_section_honors_all_toggle_keys() {
+        clear_env();
+        let path = temp_config_path("logs");
+        std::fs::write(
+            &path,
+            r#"
+[broker]
+account = "DU1234567"
+
+[universe]
+tickers = ["AAPL"]
+
+[strategy]
+expiration_dates = ["20260515"]
+
+[logs]
+diagnostic_log = true
+action_log = true
+trade_log = false
+print_statements = false
+api_log = true
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::from_path(Some(&path)).unwrap();
+        assert!(config.logs.diagnostic_log);
+        assert!(config.logs.action_log);
+        assert!(!config.logs.trade_log);
+        assert!(!config.logs.print_statements);
+        assert!(config.logs.api_log);
+
+        std::fs::remove_file(path).unwrap();
+        clear_env();
+    }
+
+    #[test]
+    fn file_logs_section_accepts_legacy_api_log_key() {
+        clear_env();
+        let path = temp_config_path("legacy-api-log");
+        std::fs::write(
+            &path,
+            r#"
+[broker]
+account = "DU1234567"
+
+[universe]
+tickers = ["AAPL"]
+
+[strategy]
+expiration_dates = ["20260515"]
+
+[logs]
+API_log = true
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::from_path(Some(&path)).unwrap();
+        assert!(config.logs.api_log);
+
+        std::fs::remove_file(path).unwrap();
+        clear_env();
+    }
 }

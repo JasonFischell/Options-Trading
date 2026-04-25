@@ -199,12 +199,25 @@ where
     .buffer_unordered(symbol_concurrency);
     let total_symbols = universe.len();
     let mut completed_symbol_requests = 0usize;
+    if config.logs.print_statements && total_symbols > 0 {
+        println!(
+            "Analyzing stocks {}-{} of {}",
+            1,
+            total_symbols.min(10),
+            total_symbols
+        );
+    }
     while let Some(result) = snapshot_stream.next().await {
         completed_symbol_requests += 1;
-        if config.logs.print_statements {
+        if config.logs.print_statements
+            && completed_symbol_requests % 10 == 0
+            && completed_symbol_requests < total_symbols
+        {
+            let next_batch_start = completed_symbol_requests + 1;
+            let next_batch_end = (next_batch_start + 9).min(total_symbols);
             println!(
-                "PROGRESS: stocks analyzed {}/{} | options considered {}",
-                completed_symbol_requests, total_symbols, option_quotes_considered
+                "Analyzing stocks {}-{} of {}",
+                next_batch_start, next_batch_end, total_symbols
             );
         }
         snapshot_results.push(result);
@@ -435,6 +448,10 @@ where
             &mut guardrail_rejections,
             &mut action_log,
         );
+    }
+
+    if config.logs.print_statements {
+        println!("Analyzing trades for {} stocks selected.", selected_symbols);
     }
 
     let execution_records = executor.execute(&proposed_orders, config).await?;
