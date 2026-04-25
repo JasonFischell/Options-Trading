@@ -159,6 +159,14 @@ pub async fn fetch_account_state(client: &Client, account: &str) -> Result<Accou
         state.available_funds = fallback_available_funds;
     }
 
+    if diagnostics.account_was_unmatched() {
+        anyhow::bail!(
+            "configured account {} was not found in IBKR API responses; accounts seen: {}",
+            account,
+            diagnostics.render_seen_accounts()
+        );
+    }
+
     info!(
         configured_account = %account,
         summary_rows_seen = diagnostics.summary_rows_seen,
@@ -211,6 +219,7 @@ async fn populate_account_state_from_summary(
         match result.context("failed to receive IBKR account summary update")? {
             AccountSummaryResult::Summary(summary) => {
                 diagnostics.summary_rows_seen += 1;
+                diagnostics.record_seen_account(&summary.account);
                 let matched = account_summary_matches(account, &summary.account);
                 diagnostics.push_sample(format!(
                     "summary account={} tag={} value={} currency={} matched={}",
@@ -254,6 +263,9 @@ async fn populate_account_state_from_updates(
             AccountUpdate::AccountValue(value) => {
                 diagnostics.update_rows_seen += 1;
                 let update_account = value.account.as_deref().unwrap_or("");
+                if !update_account.is_empty() {
+                    diagnostics.record_seen_account(update_account);
+                }
                 let matched =
                     update_account.is_empty() || account_summary_matches(account, update_account);
                 diagnostics.push_sample(format!(
@@ -347,6 +359,7 @@ struct AccountMetricDiagnostics {
     update_rows_seen: usize,
     update_rows_matched: usize,
     samples: Vec<String>,
+    seen_accounts: Vec<String>,
 }
 
 impl AccountMetricDiagnostics {
@@ -358,11 +371,38 @@ impl AccountMetricDiagnostics {
         }
     }
 
+    fn record_seen_account(&mut self, account: &str) {
+        let normalized = account.trim();
+        if normalized.is_empty()
+            || self
+                .seen_accounts
+                .iter()
+                .any(|existing| existing == normalized)
+        {
+            return;
+        }
+        self.seen_accounts.push(normalized.to_string());
+    }
+
     fn render_samples(&self) -> String {
         if self.samples.is_empty() {
             "none".to_string()
         } else {
             self.samples.join(" | ")
+        }
+    }
+
+    fn account_was_unmatched(&self) -> bool {
+        (self.summary_rows_seen > 0 || self.update_rows_seen > 0)
+            && self.summary_rows_matched == 0
+            && self.update_rows_matched == 0
+    }
+
+    fn render_seen_accounts(&self) -> String {
+        if self.seen_accounts.is_empty() {
+            "none".to_string()
+        } else {
+            self.seen_accounts.join(", ")
         }
     }
 }

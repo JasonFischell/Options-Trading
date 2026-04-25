@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Local;
 
 use crate::{
     artifacts::{docs_dir, timestamped_log_path_in},
@@ -69,7 +70,7 @@ fn write_cycle_outputs_in(
         outputs.action_log_path = Some(path);
     }
     if config.logs.trade_log {
-        let path = timestamped_log_path_in(root, TRADE_LOG_DIR, "trade", "log");
+        let path = trade_log_path(root);
         write_log_file(&path, &render_trade_log(report))?;
         outputs.trade_log_path = Some(path);
     }
@@ -399,6 +400,15 @@ pub fn render_trade_summary(report: &CycleReport) -> Vec<String> {
     render_current_position_lines(report)
 }
 
+pub fn render_current_open_position_summary(report: &CycleReport) -> Vec<String> {
+    let lines = render_current_position_lines(report);
+    if lines.is_empty() {
+        vec!["- none".to_string()]
+    } else {
+        lines.into_iter().map(|line| format!("- {line}")).collect()
+    }
+}
+
 pub fn render_filled_trade_summary(report: &CycleReport) -> Vec<String> {
     report
         .execution_records
@@ -424,10 +434,12 @@ fn render_current_position_lines(report: &CycleReport) -> Vec<String> {
         .filter(|lifecycle| lifecycle_represents_opened_trade(lifecycle))
         .map(|lifecycle| {
             format!(
-                "{} | status={} | placed_at={} | stock {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | order_ids={}",
+                "{} | status={} | placed_at={} | purchase net debit {} | current value net credit n/a | current profit n/a | expected profit {} | stock {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | order_ids={}",
                 lifecycle.symbol,
                 lifecycle.status,
                 lifecycle.first_recorded_at.to_rfc3339(),
+                format_optional_price(lifecycle.entry_net_debit),
+                format_optional_price(lifecycle.expected_profit),
                 lifecycle.stock_filled_shares,
                 format_optional_price(lifecycle.stock_average_fill_price),
                 lifecycle.short_call_filled_contracts,
@@ -1032,9 +1044,12 @@ fn render_system_state(report: &CycleReport) -> Vec<String> {
 
 fn render_lifecycle_record(lifecycle: &PaperTradeLifecycleRecord) -> String {
     format!(
-        "  {} | status={} | stock fill {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | hold_until_close={} | note={}",
+        "  {} | status={} | placed_at={} | purchase net debit {} | current value net credit n/a | current profit n/a | expected profit {} | stock fill {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | hold_until_close={} | note={}",
         lifecycle.symbol,
         lifecycle.status,
+        lifecycle.first_recorded_at.to_rfc3339(),
+        format_optional_price(lifecycle.entry_net_debit),
+        format_optional_price(lifecycle.expected_profit),
         lifecycle.stock_filled_shares,
         format_optional_price(lifecycle.stock_average_fill_price),
         lifecycle.short_call_filled_contracts,
@@ -1159,6 +1174,13 @@ fn format_optional_price(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}"))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn trade_log_path(root: &Path) -> PathBuf {
+    root.join(TRADE_LOG_DIR).join(format!(
+        "{}_Trade_Log.txt",
+        Local::now().format("%Y%m%d-%H-%M-%S")
+    ))
 }
 
 #[cfg(test)]
@@ -1383,6 +1405,8 @@ mod tests {
                 short_call_filled_contracts: 0.0,
                 stock_average_fill_price: None,
                 short_call_average_fill_price: None,
+                entry_net_debit: Some(8_925.0),
+                expected_profit: Some(75.0),
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "tracked in paper ledger".to_string(),
@@ -1516,6 +1540,8 @@ mod tests {
                     short_call_filled_contracts: 0.0,
                     stock_average_fill_price: None,
                     short_call_average_fill_price: None,
+                    entry_net_debit: None,
+                    expected_profit: None,
                     observed_stock_shares: 0.0,
                     observed_short_call_contracts: 0.0,
                     note: "awaiting fill".to_string(),
@@ -1533,6 +1559,8 @@ mod tests {
                     short_call_filled_contracts: 1.0,
                     stock_average_fill_price: Some(95.0),
                     short_call_average_fill_price: Some(6.5),
+                    entry_net_debit: Some(8_850.0),
+                    expected_profit: Some(150.0),
                     observed_stock_shares: 100.0,
                     observed_short_call_contracts: 1.0,
                     note: "opened".to_string(),
@@ -1807,6 +1835,8 @@ mod tests {
                 short_call_filled_contracts: 1.0,
                 stock_average_fill_price: Some(100.0),
                 short_call_average_fill_price: Some(11.0),
+                entry_net_debit: Some(8_900.0),
+                expected_profit: Some(100.0),
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "tracked".to_string(),
@@ -1922,6 +1952,8 @@ mod tests {
                 short_call_filled_contracts: 1.0,
                 stock_average_fill_price: Some(95.0),
                 short_call_average_fill_price: Some(6.5),
+                entry_net_debit: Some(8_850.0),
+                expected_profit: Some(150.0),
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "opened".to_string(),

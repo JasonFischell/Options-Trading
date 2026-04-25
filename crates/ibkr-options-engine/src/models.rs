@@ -386,6 +386,8 @@ pub struct PaperTradeLifecycleRecord {
     pub short_call_filled_contracts: f64,
     pub stock_average_fill_price: Option<f64>,
     pub short_call_average_fill_price: Option<f64>,
+    pub entry_net_debit: Option<f64>,
+    pub expected_profit: Option<f64>,
     pub observed_stock_shares: f64,
     pub observed_short_call_contracts: f64,
     pub note: String,

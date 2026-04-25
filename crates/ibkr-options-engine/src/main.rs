@@ -13,8 +13,8 @@ use ibkr_options_engine::{
     models::StatusReport,
     paper_state::PaperTradeLedger,
     reporting::{
-        render_filled_trade_summary, render_left_open_trade_summary, write_cycle_outputs,
-        write_status_outputs,
+        render_current_open_position_summary, render_filled_trade_summary,
+        render_left_open_trade_summary, write_cycle_outputs, write_status_outputs,
     },
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
@@ -111,10 +111,11 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
             report.proposed_orders.len(),
             report.execution_records.len()
         );
-        for warning in &report.warnings {
-            println!("WARN: {warning}");
-        }
         for line in outputs.terminal_lines() {
+            println!("{line}");
+        }
+        println!("Current open positions:");
+        for line in render_current_open_position_summary(&report) {
             println!("{line}");
         }
         let filled_trade_summaries = render_filled_trade_summary(&report);
@@ -235,7 +236,7 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ibkr_options_engine=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("ibkr_options_engine=error"));
 
     fmt().with_env_filter(filter).init();
 }

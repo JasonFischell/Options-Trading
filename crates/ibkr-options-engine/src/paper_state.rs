@@ -265,6 +265,8 @@ impl PaperTradeLedger {
                     entry.short_call_filled_contracts = short_call_filled_contracts;
                     entry.stock_average_fill_price = stock_average_fill_price;
                     entry.short_call_average_fill_price = short_call_average_fill_price;
+                    entry.entry_net_debit = intent.combo_limit_price.map(|value| value * 100.0);
+                    entry.expected_profit = Some(intent.max_profit);
                     entry.note = execution.note.clone();
                 }
                 None => self.entries.push(PaperTradeLifecycleRecord {
@@ -280,6 +282,8 @@ impl PaperTradeLedger {
                     short_call_filled_contracts,
                     stock_average_fill_price,
                     short_call_average_fill_price,
+                    entry_net_debit: intent.combo_limit_price.map(|value| value * 100.0),
+                    expected_profit: Some(intent.max_profit),
                     observed_stock_shares: 0.0,
                     observed_short_call_contracts: 0.0,
                     note: execution.note.clone(),
@@ -338,6 +342,8 @@ impl PaperTradeLedger {
                 short_call_filled_contracts: 0.0,
                 stock_average_fill_price: position.average_stock_cost,
                 short_call_average_fill_price: None,
+                entry_net_debit: None,
+                expected_profit: None,
                 observed_stock_shares: position.stock_shares,
                 observed_short_call_contracts: position.short_call_contracts,
                 note,
