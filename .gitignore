@@ -27,8 +27,6 @@ target-*/
 secrets/
 *.local.toml
 docs/local/*
-!docs/local/ibkr-options-engine.example.toml
-!docs/local/ibkr-options-engine.paper-trading.toml
 crates/ibkr-options-engine/logs/ibkr-order-events-*.json
 */docs/Trades_Executed*
 
