@@ -44,8 +44,8 @@ struct CsvLayout {
 struct RowUpdate {
     row_index: usize,
     ticker: String,
-    price: String,
-    beta: String,
+    price: Option<String>,
+    beta: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +95,34 @@ impl FinnhubClient {
 
         Ok(None)
     }
+
+    async fn fetch_price(&self, ticker: &str) -> Result<Option<f64>> {
+        let symbol = ticker.trim().to_uppercase();
+        for token in &self.tokens {
+            let response = self
+                .http
+                .get(format!("{}/quote", self.base_url))
+                .query(&[("symbol", symbol.as_str()), ("token", token.as_str())])
+                .send()
+                .await
+                .with_context(|| format!("failed to request Finnhub price for {symbol}"))?;
+
+            if !response.status().is_success() {
+                continue;
+            }
+
+            let payload: Value = response
+                .json()
+                .await
+                .with_context(|| format!("failed to decode Finnhub price payload for {symbol}"))?;
+
+            if let Some(price) = extract_price_from_quote_payload(&payload) {
+                return Ok(Some(price));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[tokio::main]
@@ -133,30 +161,64 @@ async fn build_updates(
     rows: &[StringRecord],
 ) -> Result<Vec<RowUpdate>> {
     let mut updates = Vec::new();
+    let tickers = rows
+        .iter()
+        .filter_map(|row| {
+            let ticker = row.get(0).unwrap_or_default().trim();
+            (!ticker.is_empty()).then_some(ticker)
+        })
+        .count();
+    let mut ticker_position = 0usize;
 
     for (row_index, row) in rows.iter().enumerate() {
         let raw_ticker = row.get(0).unwrap_or_default().trim();
         if raw_ticker.is_empty() {
             continue;
         }
+        ticker_position += 1;
 
         let ibkr_symbol = normalize_ticker_for_lookup(raw_ticker);
-        let snapshot = request_underlying_snapshot(ibkr_client, &ibkr_symbol)
-            .await
-            .with_context(|| format!("failed to request IBKR price snapshot for {ibkr_symbol}"))?;
-        let price = snapshot
-            .reference_price()
-            .with_context(|| format!("IBKR returned no usable price for ticker {ibkr_symbol}"))?;
-        let beta = finnhub
-            .fetch_beta(&ibkr_symbol)
-            .await?
-            .with_context(|| format!("Finnhub returned no beta for ticker {ibkr_symbol}"))?;
+        println!(
+            "Pulling price and beta for {} (stock {} of {})",
+            ibkr_symbol, ticker_position, tickers
+        );
+
+        let price = match request_underlying_snapshot(ibkr_client, &ibkr_symbol).await {
+            Ok(snapshot) => snapshot.reference_price(),
+            Err(error) => {
+                eprintln!(
+                    "IBKR price lookup failed for {}: {}. Trying Finnhub quote fallback.",
+                    ibkr_symbol, error
+                );
+                None
+            }
+        };
+        let price = match price {
+            Some(price) => Some(price),
+            None => {
+                let finnhub_price = finnhub.fetch_price(&ibkr_symbol).await?;
+                if finnhub_price.is_none() {
+                    eprintln!(
+                        "No price available from IBKR or Finnhub for {}; leaving price unchanged.",
+                        ibkr_symbol
+                    );
+                }
+                finnhub_price
+            }
+        };
+        let beta = finnhub.fetch_beta(&ibkr_symbol).await?;
+        if beta.is_none() {
+            eprintln!(
+                "No Finnhub beta available for {}; leaving beta unchanged.",
+                ibkr_symbol
+            );
+        }
 
         updates.push(RowUpdate {
             row_index,
             ticker: raw_ticker.to_string(),
-            price: format_decimal(price),
-            beta: format_decimal(beta),
+            price: price.map(format_decimal),
+            beta: beta.map(format_decimal),
         });
     }
 
@@ -226,10 +288,17 @@ fn write_updated_csv(path: &Path, layout: CsvLayout, updates: &[RowUpdate]) -> R
             .get_mut(update.row_index)
             .with_context(|| format!("missing CSV row {}", update.row_index))?;
         ensure_len(row, 3);
-        *row = set_field(row, 0, &update.ticker)
-            .and_then(|updated| set_field(&updated, 1, &update.price))
-            .and_then(|updated| set_field(&updated, 2, &update.beta))
+        let mut updated = set_field(row, 0, &update.ticker)
             .with_context(|| format!("failed to update CSV row {}", update.row_index))?;
+        if let Some(price) = &update.price {
+            updated = set_field(&updated, 1, price)
+                .with_context(|| format!("failed to update price for row {}", update.row_index))?;
+        }
+        if let Some(beta) = &update.beta {
+            updated = set_field(&updated, 2, beta)
+                .with_context(|| format!("failed to update beta for row {}", update.row_index))?;
+        }
+        *row = updated;
     }
 
     let temp_path = temporary_output_path(path);
@@ -309,11 +378,18 @@ fn extract_beta_from_metric_payload(payload: &Value) -> Option<f64> {
         .filter(|beta| beta.is_finite() && *beta > 0.0)
 }
 
+fn extract_price_from_quote_payload(payload: &Value) -> Option<f64> {
+    payload
+        .get("c")
+        .and_then(Value::as_f64)
+        .filter(|price| price.is_finite() && *price > 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_beta_from_metric_payload, format_decimal, normalize_csv_layout, normalized_header,
-        row_looks_like_header, write_updated_csv,
+        extract_beta_from_metric_payload, extract_price_from_quote_payload, format_decimal,
+        normalize_csv_layout, normalized_header, row_looks_like_header, write_updated_csv,
     };
     use std::fs;
 
@@ -373,6 +449,15 @@ mod tests {
     }
 
     #[test]
+    fn extracts_price_from_finnhub_quote_payload() {
+        assert_eq!(
+            extract_price_from_quote_payload(&json!({"c": 101.25})),
+            Some(101.25)
+        );
+        assert_eq!(extract_price_from_quote_payload(&json!({"c": 0.0})), None);
+    }
+
+    #[test]
     fn rewrites_csv_in_place_with_updated_columns() -> Result<()> {
         let temp_root = std::env::temp_dir().join(format!(
             "options-trading-ibkr-csv-quote-beta-{}",
@@ -391,14 +476,14 @@ mod tests {
             super::RowUpdate {
                 row_index: 0,
                 ticker: "AAPL".to_string(),
-                price: "123.45".to_string(),
-                beta: "1.2".to_string(),
+                price: Some("123.45".to_string()),
+                beta: Some("1.2".to_string()),
             },
             super::RowUpdate {
                 row_index: 1,
                 ticker: "MSFT".to_string(),
-                price: "234.56".to_string(),
-                beta: "0.9".to_string(),
+                price: Some("234.56".to_string()),
+                beta: Some("0.9".to_string()),
             },
         ];
 
@@ -407,6 +492,36 @@ mod tests {
         assert!(written.contains("ticker,price,beta"));
         assert!(written.contains("AAPL,123.45,1.2"));
         assert!(written.contains("MSFT,234.56,0.9"));
+
+        fs::remove_file(&csv_path)?;
+        fs::remove_dir(&temp_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_existing_cells_when_updates_are_missing() -> Result<()> {
+        let temp_root = std::env::temp_dir().join(format!(
+            "options-trading-ibkr-csv-quote-beta-partial-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root)?;
+        let csv_path = temp_root.join("sample.csv");
+        fs::write(&csv_path, "ticker,price,beta\r\nAAPL,1,2\r\n")?;
+
+        let layout = super::normalize_csv_layout(vec![
+            StringRecord::from(vec!["ticker", "price", "beta"]),
+            StringRecord::from(vec!["AAPL", "1", "2"]),
+        ]);
+        let updates = vec![super::RowUpdate {
+            row_index: 0,
+            ticker: "AAPL".to_string(),
+            price: None,
+            beta: Some("1.5".to_string()),
+        }];
+
+        write_updated_csv(&csv_path, layout, &updates)?;
+        let written = fs::read_to_string(&csv_path)?;
+        assert!(written.contains("AAPL,1,1.5"));
 
         fs::remove_file(&csv_path)?;
         fs::remove_dir(&temp_root)?;
