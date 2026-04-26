@@ -31,6 +31,7 @@ secrets/
 *.local.toml
 docs/local/*
 */docs/Trades_Executed*
+docs/stock_lists/*
 
 # OS / editors
 .DS_Store
