@@ -6,6 +6,7 @@ use chrono::Utc;
 use crate::{
     artifacts::logs_dir,
     config::AppConfig,
+    market_data::OpenPositionMarketMark,
     models::{
         BrokerCompletedOrder, BrokerOpenOrder, ExecutionRecord, GuardrailRejection, InstrumentType,
         OpenPositionState, OrderIntent, PaperTradeLifecycleRecord,
@@ -267,6 +268,10 @@ impl PaperTradeLedger {
                     entry.short_call_average_fill_price = short_call_average_fill_price;
                     entry.entry_net_debit = intent.combo_limit_price.map(|value| value * 100.0);
                     entry.expected_profit = Some(intent.max_profit);
+                    entry.current_underlying_price = None;
+                    entry.current_short_call_price = None;
+                    entry.current_value_net_credit = None;
+                    entry.current_profit = None;
                     entry.note = execution.note.clone();
                 }
                 None => self.entries.push(PaperTradeLifecycleRecord {
@@ -284,6 +289,10 @@ impl PaperTradeLedger {
                     short_call_average_fill_price,
                     entry_net_debit: intent.combo_limit_price.map(|value| value * 100.0),
                     expected_profit: Some(intent.max_profit),
+                    current_underlying_price: None,
+                    current_short_call_price: None,
+                    current_value_net_credit: None,
+                    current_profit: None,
                     observed_stock_shares: 0.0,
                     observed_short_call_contracts: 0.0,
                     note: execution.note.clone(),
@@ -301,6 +310,38 @@ impl PaperTradeLedger {
         let mut entries = self.entries.clone();
         entries.sort_by(|left, right| left.symbol.cmp(&right.symbol));
         entries
+    }
+
+    pub fn apply_market_marks(
+        &mut self,
+        marks: &[OpenPositionMarketMark],
+        action_log: &mut Vec<String>,
+    ) {
+        for mark in marks {
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.symbol == mark.symbol)
+            {
+                entry.stock_average_fill_price = mark
+                    .stock_average_fill_price
+                    .or(entry.stock_average_fill_price);
+                entry.short_call_average_fill_price = mark
+                    .short_call_average_fill_price
+                    .or(entry.short_call_average_fill_price);
+                entry.entry_net_debit = mark.entry_net_debit.or(entry.entry_net_debit);
+                entry.expected_profit = mark.expected_profit.or(entry.expected_profit);
+                entry.current_underlying_price = mark.current_underlying_price;
+                entry.current_short_call_price = mark.current_short_call_price;
+                entry.current_value_net_credit = mark.current_value_net_credit;
+                entry.current_profit = mark.current_profit;
+                entry.last_updated_at = Utc::now();
+                action_log.push(format!(
+                    "{}: refreshed current covered-call marks from market data.",
+                    entry.symbol
+                ));
+            }
+        }
     }
 
     fn find_active(&self, symbol: &str) -> Option<&PaperTradeLifecycleRecord> {
@@ -344,6 +385,10 @@ impl PaperTradeLedger {
                 short_call_average_fill_price: None,
                 entry_net_debit: None,
                 expected_profit: None,
+                current_underlying_price: None,
+                current_short_call_price: None,
+                current_value_net_credit: None,
+                current_profit: None,
                 observed_stock_shares: position.stock_shares,
                 observed_short_call_contracts: position.short_call_contracts,
                 note,

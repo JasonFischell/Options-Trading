@@ -31,6 +31,23 @@ pub struct SymbolMarketSnapshot {
     pub option_quotes: Vec<OptionQuoteSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenPositionMarketMark {
+    pub symbol: String,
+    pub stock_average_fill_price: Option<f64>,
+    pub short_call_average_fill_price: Option<f64>,
+    pub entry_net_debit: Option<f64>,
+    pub expected_profit: Option<f64>,
+    pub current_underlying_price: Option<f64>,
+    pub current_short_call_price: Option<f64>,
+    pub current_value_net_credit: Option<f64>,
+    pub current_profit: Option<f64>,
+}
+
+fn normalize_option_average_cost_per_share(raw_average_cost: f64) -> f64 {
+    raw_average_cost / 100.0
+}
+
 #[async_trait(?Send)]
 pub trait MarketDataProvider {
     async fn prepare_scan_cycle(&self, _config: &AppConfig) -> Result<()> {
@@ -47,6 +64,14 @@ pub trait MarketDataProvider {
         record: &UniverseRecord,
         config: &AppConfig,
     ) -> Result<Option<SymbolMarketSnapshot>>;
+
+    async fn load_open_position_market_marks(
+        &self,
+        _positions: &[InventoryPosition],
+        _config: &AppConfig,
+    ) -> Result<Vec<OpenPositionMarketMark>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct IbkrMarketDataProvider {
@@ -291,6 +316,118 @@ impl MarketDataProvider for IbkrMarketDataProvider {
             underlying,
             option_quotes,
         }))
+    }
+
+    async fn load_open_position_market_marks(
+        &self,
+        positions: &[InventoryPosition],
+        _config: &AppConfig,
+    ) -> Result<Vec<OpenPositionMarketMark>> {
+        let mut marks = Vec::new();
+        let covered_symbols = positions
+            .iter()
+            .filter(|position| position.security_type == "STK" && position.quantity >= 100.0)
+            .map(|position| position.symbol.clone())
+            .collect::<BTreeSet<_>>();
+
+        for symbol in covered_symbols {
+            let stock_position = positions
+                .iter()
+                .find(|position| {
+                    position.symbol == symbol
+                        && position.security_type == "STK"
+                        && position.quantity > 0.0
+                })
+                .cloned();
+            let short_call_position = positions
+                .iter()
+                .find(|position| {
+                    position.symbol == symbol
+                        && position.security_type == "OPT"
+                        && position.quantity < 0.0
+                        && position.right.as_deref() == Some("C")
+                })
+                .cloned();
+
+            let Some(stock_position) = stock_position else {
+                continue;
+            };
+
+            let underlying_contract = resolve_primary_stock_contract(&self.client, &symbol).await?;
+            let underlying = request_underlying_snapshot_for_contract(
+                &self.client,
+                &symbol,
+                &underlying_contract,
+            )
+            .await?;
+            let current_underlying_price = underlying.reference_price();
+
+            let mut short_call_average_fill_price = None;
+            let mut current_short_call_price = None;
+            let mut entry_net_debit =
+                Some(stock_position.average_cost * stock_position.quantity.abs());
+            let mut expected_profit = None;
+
+            if let Some(option_position) = short_call_position.as_ref() {
+                let selected = SelectedOptionContract {
+                    symbol: symbol.clone(),
+                    right: option_position
+                        .right
+                        .clone()
+                        .unwrap_or_else(|| "C".to_string()),
+                    expiration: option_position.expiry.clone().unwrap_or_default(),
+                    strike: option_position.strike.unwrap_or_default(),
+                    chain_metadata: Vec::new(),
+                };
+                let option_quote = request_option_quote(&self.client, selected).await?;
+                let short_call_average_cost_per_share =
+                    normalize_option_average_cost_per_share(option_position.average_cost);
+                short_call_average_fill_price = Some(short_call_average_cost_per_share);
+                current_short_call_price = option_quote.best_credit();
+
+                let option_contracts = option_position.quantity.abs();
+                let option_credit_basis =
+                    short_call_average_cost_per_share * option_contracts * 100.0;
+                entry_net_debit =
+                    entry_net_debit.map(|stock_basis| stock_basis - option_credit_basis);
+
+                if let (Some(strike), Some(net_debit)) = (option_position.strike, entry_net_debit) {
+                    let covered_shares =
+                        stock_position.quantity.abs().min(option_contracts * 100.0);
+                    expected_profit = Some(strike * covered_shares - net_debit);
+                }
+            }
+
+            let current_value_net_credit = current_underlying_price.map(|stock_mark| {
+                let stock_value = stock_position.quantity.abs() * stock_mark;
+                let short_call_liability = short_call_position
+                    .as_ref()
+                    .and_then(|position| {
+                        current_short_call_price
+                            .map(|option_mark| position.quantity.abs() * 100.0 * option_mark)
+                    })
+                    .unwrap_or(0.0);
+                stock_value - short_call_liability
+            });
+            let current_profit = match (current_value_net_credit, entry_net_debit) {
+                (Some(current_value), Some(entry_value)) => Some(current_value - entry_value),
+                _ => None,
+            };
+
+            marks.push(OpenPositionMarketMark {
+                symbol,
+                stock_average_fill_price: Some(stock_position.average_cost),
+                short_call_average_fill_price,
+                entry_net_debit,
+                expected_profit,
+                current_underlying_price,
+                current_short_call_price,
+                current_value_net_credit,
+                current_profit,
+            });
+        }
+
+        Ok(marks)
     }
 }
 
@@ -759,5 +896,13 @@ mod tests {
         assert!(!delayed_retry_available(&[
             "observed data origin: unknown".to_string()
         ]));
+    }
+
+    #[test]
+    fn normalizes_option_average_cost_to_per_share_units() {
+        assert!(
+            (super::normalize_option_average_cost_per_share(83.22705) - 0.8322705).abs() < 1e-9
+        );
+        assert!((super::normalize_option_average_cost_per_share(204.2245) - 2.042245).abs() < 1e-9);
     }
 }

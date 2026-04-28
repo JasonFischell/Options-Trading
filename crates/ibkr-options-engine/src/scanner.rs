@@ -68,7 +68,7 @@ where
     let _plan = build_scan_plan(config, &universe_symbols);
 
     let account = provider.load_account_state().await?;
-    let positions = provider.load_inventory().await?;
+    let mut positions = provider.load_inventory().await?;
     let mut paper_trade_ledger = PaperTradeLedger::load(config)?;
 
     let mut guardrail_rejections = Vec::new();
@@ -497,13 +497,19 @@ where
             "Reloaded {} inventory position row(s) after submissions.",
             refreshed_positions.len()
         ));
-        open_positions = crate::state::summarize_open_positions(&refreshed_positions);
+        positions = refreshed_positions;
+        open_positions = crate::state::summarize_open_positions(&positions);
         paper_trade_ledger.reconcile_with_positions(&open_positions, &mut action_log);
         action_log.push(
             "Refreshed IBKR positions after paper submissions to update hold-to-close lifecycle state."
                 .to_string(),
         );
     }
+
+    let open_position_market_marks = provider
+        .load_open_position_market_marks(&positions, config)
+        .await?;
+    paper_trade_ledger.apply_market_marks(&open_position_market_marks, &mut action_log);
 
     paper_trade_ledger.persist(config)?;
     let paper_trade_lifecycle = paper_trade_ledger.snapshot();

@@ -19,6 +19,7 @@ use crate::{
 const DIAGNOSTIC_LOG_DIR: &str = "diagnostic";
 const ACTION_LOG_DIR: &str = "action";
 const TRADE_LOG_DIR: &str = "trades";
+const PROPOSED_TRADES_LOG_DIR: &str = "proposed-trades";
 const API_LOG_DIR: &str = "api";
 
 #[derive(Debug, Default, Clone)]
@@ -26,6 +27,7 @@ pub struct OutputArtifacts {
     pub diagnostic_log_path: Option<PathBuf>,
     pub action_log_path: Option<PathBuf>,
     pub trade_log_path: Option<PathBuf>,
+    pub proposed_trades_log_path: Option<PathBuf>,
     pub api_log_path: Option<PathBuf>,
 }
 
@@ -40,6 +42,9 @@ impl OutputArtifacts {
         }
         if let Some(path) = &self.trade_log_path {
             lines.push(format!("Trade log: {}", path.display()));
+        }
+        if let Some(path) = &self.proposed_trades_log_path {
+            lines.push(format!("Proposed trades log: {}", path.display()));
         }
         if let Some(path) = &self.api_log_path {
             lines.push(format!("API log: {}", path.display()));
@@ -74,6 +79,9 @@ fn write_cycle_outputs_in(
         write_log_file(&path, &render_trade_log(report))?;
         outputs.trade_log_path = Some(path);
     }
+    let path = proposed_trades_log_path(root);
+    write_log_file(&path, &render_proposed_trades_log(report))?;
+    outputs.proposed_trades_log_path = Some(path);
     if config.logs.api_log {
         let path = timestamped_log_path_in(root, API_LOG_DIR, "API", "txt");
         write_log_file(&path, &render_cycle_api_log(config, report))?;
@@ -433,17 +441,37 @@ fn render_current_position_lines(report: &CycleReport) -> Vec<String> {
         .iter()
         .filter(|lifecycle| lifecycle_represents_opened_trade(lifecycle))
         .map(|lifecycle| {
+            let stock_shares = if lifecycle.stock_filled_shares > 0.0 {
+                lifecycle.stock_filled_shares
+            } else {
+                lifecycle.observed_stock_shares
+            };
+            let short_calls = if lifecycle.short_call_filled_contracts > 0.0 {
+                lifecycle.short_call_filled_contracts
+            } else {
+                lifecycle.observed_short_call_contracts
+            };
             format!(
-                "{} | status={} | placed_at={} | purchase net debit {} | current value net credit n/a | current profit n/a | expected profit {} | stock {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | order_ids={}",
+                "{} | status={} | placed_at={} | purchase net debit {} | current value net credit {} | current profit {} | expected profit {} | stock {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | order_ids={}",
                 lifecycle.symbol,
                 lifecycle.status,
                 lifecycle.first_recorded_at.to_rfc3339(),
                 format_optional_price(lifecycle.entry_net_debit),
+                format_optional_price(lifecycle.current_value_net_credit),
+                format_optional_price(lifecycle.current_profit),
                 format_optional_price(lifecycle.expected_profit),
-                lifecycle.stock_filled_shares,
-                format_optional_price(lifecycle.stock_average_fill_price),
-                lifecycle.short_call_filled_contracts,
-                format_optional_price(lifecycle.short_call_average_fill_price),
+                stock_shares,
+                format_optional_price(
+                    lifecycle
+                        .current_underlying_price
+                        .or(lifecycle.stock_average_fill_price)
+                ),
+                short_calls,
+                format_optional_price(
+                    lifecycle
+                        .current_short_call_price
+                        .or(lifecycle.short_call_average_fill_price)
+                ),
                 lifecycle.observed_stock_shares,
                 lifecycle.observed_short_call_contracts,
                 render_lifecycle_order_ids(lifecycle)
@@ -468,6 +496,23 @@ fn render_trade_log(report: &CycleReport) -> String {
         section_lines_or_none(current_positions),
     );
 
+    lines.join("\n")
+}
+
+pub fn render_proposed_trades_log(report: &CycleReport) -> String {
+    let mut lines = vec!["Proposed Trades".to_string()];
+    lines.push(format!(
+        "Generated: {}",
+        Local::now().format("%Y-%m-%d %H:%M:%S %Z")
+    ));
+    lines.push(format!(
+        "Proposed orders: {} | execution records: {}",
+        report.proposed_orders.len(),
+        report.execution_records.len()
+    ));
+    lines.push(String::new());
+    lines.push("Orders Proposed this Run:".to_string());
+    lines.extend(render_proposed_orders(&report.proposed_orders));
     lines.join("\n")
 }
 
@@ -1042,17 +1087,37 @@ fn render_system_state(report: &CycleReport) -> Vec<String> {
 }
 
 fn render_lifecycle_record(lifecycle: &PaperTradeLifecycleRecord) -> String {
+    let stock_shares = if lifecycle.stock_filled_shares > 0.0 {
+        lifecycle.stock_filled_shares
+    } else {
+        lifecycle.observed_stock_shares
+    };
+    let short_calls = if lifecycle.short_call_filled_contracts > 0.0 {
+        lifecycle.short_call_filled_contracts
+    } else {
+        lifecycle.observed_short_call_contracts
+    };
     format!(
-        "  {} | status={} | placed_at={} | purchase net debit {} | current value net credit n/a | current profit n/a | expected profit {} | stock fill {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | hold_until_close={} | note={}",
+        "  {} | status={} | placed_at={} | purchase net debit {} | current value net credit {} | current profit {} | expected profit {} | stock fill {:.0} @ {} | short calls {:.0} @ {} | observed shares {:.0} | observed short calls {:.0} | hold_until_close={} | note={}",
         lifecycle.symbol,
         lifecycle.status,
         lifecycle.first_recorded_at.to_rfc3339(),
         format_optional_price(lifecycle.entry_net_debit),
+        format_optional_price(lifecycle.current_value_net_credit),
+        format_optional_price(lifecycle.current_profit),
         format_optional_price(lifecycle.expected_profit),
-        lifecycle.stock_filled_shares,
-        format_optional_price(lifecycle.stock_average_fill_price),
-        lifecycle.short_call_filled_contracts,
-        format_optional_price(lifecycle.short_call_average_fill_price),
+        stock_shares,
+        format_optional_price(
+            lifecycle
+                .current_underlying_price
+                .or(lifecycle.stock_average_fill_price)
+        ),
+        short_calls,
+        format_optional_price(
+            lifecycle
+                .current_short_call_price
+                .or(lifecycle.short_call_average_fill_price)
+        ),
         lifecycle.observed_stock_shares,
         lifecycle.observed_short_call_contracts,
         lifecycle.hold_until_close,
@@ -1182,6 +1247,13 @@ fn trade_log_path(root: &Path) -> PathBuf {
     ))
 }
 
+fn proposed_trades_log_path(root: &Path) -> PathBuf {
+    root.join(PROPOSED_TRADES_LOG_DIR).join(format!(
+        "{}_Proposed_Trades_Log.txt",
+        Local::now().format("%Y%m%d-%H-%M-%S")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
@@ -1189,8 +1261,8 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        render_cycle_action_log, render_human_log, render_status_log, render_trade_log,
-        write_cycle_outputs_in, write_status_outputs_in,
+        render_cycle_action_log, render_human_log, render_proposed_trades_log, render_status_log,
+        render_trade_log, write_cycle_outputs_in, write_status_outputs_in,
     };
     use crate::{
         config::{
@@ -1406,6 +1478,10 @@ mod tests {
                 short_call_average_fill_price: None,
                 entry_net_debit: Some(8_925.0),
                 expected_profit: Some(75.0),
+                current_underlying_price: None,
+                current_short_call_price: None,
+                current_value_net_credit: None,
+                current_profit: None,
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "tracked in paper ledger".to_string(),
@@ -1541,6 +1617,10 @@ mod tests {
                     short_call_average_fill_price: None,
                     entry_net_debit: None,
                     expected_profit: None,
+                    current_underlying_price: None,
+                    current_short_call_price: None,
+                    current_value_net_credit: None,
+                    current_profit: None,
                     observed_stock_shares: 0.0,
                     observed_short_call_contracts: 0.0,
                     note: "awaiting fill".to_string(),
@@ -1560,6 +1640,10 @@ mod tests {
                     short_call_average_fill_price: Some(6.5),
                     entry_net_debit: Some(8_850.0),
                     expected_profit: Some(150.0),
+                    current_underlying_price: None,
+                    current_short_call_price: None,
+                    current_value_net_credit: None,
+                    current_profit: None,
                     observed_stock_shares: 100.0,
                     observed_short_call_contracts: 1.0,
                     note: "opened".to_string(),
@@ -1628,6 +1712,139 @@ mod tests {
         assert!(trade_log.contains("MSFT | status=open-covered-call"));
         assert!(trade_log.contains("placed_at="));
         assert!(!trade_log.contains("AAPL | status=combo-submitted"));
+    }
+
+    #[test]
+    fn proposed_trades_log_records_order_intents() {
+        let report = CycleReport {
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            run_mode: "Manual".to_string(),
+            schedule: "manual".to_string(),
+            market_data_mode: "Live".to_string(),
+            account_state: AccountState {
+                account: "DU1234567".to_string(),
+                available_funds: Some(10_000.0),
+                buying_power: Some(20_000.0),
+                net_liquidation: Some(10_500.0),
+            },
+            universe_size: 1,
+            symbols_scanned: 1,
+            underlying_snapshots: 1,
+            option_quotes_considered: 1,
+            candidates_ranked: 1,
+            accepted_candidates: Vec::new(),
+            guardrail_rejections: Vec::new(),
+            proposed_orders: vec![OrderIntent {
+                symbol: "AAPL".to_string(),
+                strategy: "deep-ITM covered-call buy-write".to_string(),
+                account: "DU1234567".to_string(),
+                mode: "analysis-only".to_string(),
+                lot_quantity: 1,
+                combo_limit_price: Some(89.25),
+                estimated_net_debit: 8_925.0,
+                estimated_credit: 1_100.0,
+                max_profit: 75.0,
+                legs: vec![
+                    OrderLegIntent {
+                        instrument_type: InstrumentType::Stock,
+                        action: TradeAction::Buy,
+                        contract_id: Some(1),
+                        symbol: "AAPL".to_string(),
+                        description: "Buy 100 shares of AAPL".to_string(),
+                        quantity: 100,
+                        limit_price: Some(100.25),
+                        expiry: None,
+                        strike: None,
+                        right: None,
+                        exchange: Some("SMART".to_string()),
+                        trading_class: None,
+                        multiplier: None,
+                        currency: Some("USD".to_string()),
+                    },
+                    OrderLegIntent {
+                        instrument_type: InstrumentType::Option,
+                        action: TradeAction::Sell,
+                        contract_id: Some(2),
+                        symbol: "AAPL".to_string(),
+                        description: "Sell 1 AAPL 20991217 90C".to_string(),
+                        quantity: 1,
+                        limit_price: Some(11.0),
+                        expiry: Some("20991217".to_string()),
+                        strike: Some(90.0),
+                        right: Some("C".to_string()),
+                        exchange: Some("SMART".to_string()),
+                        trading_class: Some("AAPL".to_string()),
+                        multiplier: Some("100".to_string()),
+                        currency: Some("USD".to_string()),
+                    },
+                ],
+            }],
+            execution_records: Vec::new(),
+            open_positions: Vec::new(),
+            paper_trade_lifecycle: Vec::new(),
+            live_data_requested: true,
+            non_live_symbols: Vec::new(),
+            capital_source_details: CapitalSourceDetails {
+                configured_source: "available_funds".to_string(),
+                preview: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+                routed_orders: CapitalAllocationView {
+                    source: "available_funds".to_string(),
+                    reported_amount: Some(10_000.0),
+                    reserve_ratio: 0.05,
+                    reserve_amount: 500.0,
+                    cash_after_reserve: 9_500.0,
+                    deployment_budget: 10_000.0,
+                    deployable_cash: 9_500.0,
+                    max_cash_per_symbol: 2_000.0,
+                },
+            },
+            allocation_summary: AllocationSummary {
+                candidate_symbols_considered: 1,
+                selected_symbols: 1,
+                total_lots: 1,
+                existing_exposure_cash: 0.0,
+                allocated_cash: 8_925.0,
+                remaining_cash: 575.0,
+            },
+            warnings: Vec::new(),
+            diagnostic_log: Vec::new(),
+            action_log: Vec::new(),
+            api_log: Vec::new(),
+            timing_metrics: CycleTimingMetrics {
+                total_elapsed_ms: 1,
+                market_data_elapsed_ms: 1,
+            },
+            throughput_counters: CycleThroughputCounters {
+                configured_symbol_concurrency: 1,
+                configured_option_quote_concurrency_per_symbol: 1,
+                symbols_completed: 1,
+                underlying_snapshots_completed: 1,
+                option_quotes_completed: 1,
+                symbols_per_second: 1.0,
+                underlying_snapshots_per_second: 1.0,
+                option_quotes_per_second: 1.0,
+            },
+            human_log_path: None,
+            notes: Vec::new(),
+        };
+
+        let proposed_log = render_proposed_trades_log(&report);
+
+        assert!(proposed_log.contains("Proposed Trades"));
+        assert!(proposed_log.contains("Orders Proposed this Run:"));
+        assert!(proposed_log.contains("AAPL | deep-ITM covered-call buy-write"));
+        assert!(proposed_log.contains("BUY stock x100"));
+        assert!(proposed_log.contains("SELL option x1"));
     }
 
     #[test]
@@ -1836,6 +2053,10 @@ mod tests {
                 short_call_average_fill_price: Some(11.0),
                 entry_net_debit: Some(8_900.0),
                 expected_profit: Some(100.0),
+                current_underlying_price: None,
+                current_short_call_price: None,
+                current_value_net_credit: None,
+                current_profit: None,
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "tracked".to_string(),
@@ -1953,6 +2174,10 @@ mod tests {
                 short_call_average_fill_price: Some(6.5),
                 entry_net_debit: Some(8_850.0),
                 expected_profit: Some(150.0),
+                current_underlying_price: None,
+                current_short_call_price: None,
+                current_value_net_credit: None,
+                current_profit: None,
                 observed_stock_shares: 100.0,
                 observed_short_call_contracts: 1.0,
                 note: "opened".to_string(),
@@ -2055,6 +2280,21 @@ mod tests {
         );
         assert!(
             outputs
+                .proposed_trades_log_path
+                .as_ref()
+                .is_some_and(|path| path.starts_with(artifact_dir.path().join("proposed-trades")))
+        );
+        assert!(
+            outputs
+                .proposed_trades_log_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .is_some_and(|name| {
+                    name.to_string_lossy().contains("_Proposed_Trades_Log.txt")
+                })
+        );
+        assert!(
+            outputs
                 .api_log_path
                 .as_ref()
                 .is_some_and(|path| path.starts_with(artifact_dir.path().join("api")))
@@ -2104,6 +2344,7 @@ mod tests {
 
         assert!(outputs.diagnostic_log_path.is_none());
         assert!(outputs.trade_log_path.is_none());
+        assert!(outputs.proposed_trades_log_path.is_none());
         assert!(outputs.api_log_path.is_none());
         assert!(
             outputs

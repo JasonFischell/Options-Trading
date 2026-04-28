@@ -9,12 +9,13 @@ use ibkr_options_engine::{
         connect, fetch_account_state, fetch_completed_orders, fetch_open_orders, fetch_positions,
         log_server_time,
     },
-    market_data::{IbkrMarketDataProvider, load_universe},
+    market_data::{IbkrMarketDataProvider, MarketDataProvider, load_universe},
     models::StatusReport,
     paper_state::PaperTradeLedger,
     reporting::{
         render_current_open_position_summary, render_filled_trade_summary,
-        render_left_open_trade_summary, write_cycle_outputs, write_status_outputs,
+        render_left_open_trade_summary, render_proposed_trades_log, write_cycle_outputs,
+        write_status_outputs,
     },
     scanner::{build_scan_plan, run_scan_cycle},
     state::summarize_open_positions,
@@ -118,6 +119,9 @@ async fn run_scan(args: ConfigArgs) -> Result<()> {
         for line in render_current_open_position_summary(&report) {
             println!("{line}");
         }
+        for line in render_proposed_trades_log(&report).lines() {
+            println!("{line}");
+        }
         let filled_trade_summaries = render_filled_trade_summary(&report);
         let left_open_trade_summaries = render_left_open_trade_summary(&report);
         println!("Trades executed this run:");
@@ -186,6 +190,11 @@ async fn run_status(args: ConfigArgs) -> Result<()> {
 
     ledger.reconcile_with_positions(&open_positions, &mut action_log);
     ledger.reconcile_with_broker_orders(&open_orders, &completed_orders, &mut action_log);
+    let provider = IbkrMarketDataProvider::connect(&config).await?;
+    let open_position_market_marks = provider
+        .load_open_position_market_marks(&positions, &config)
+        .await?;
+    ledger.apply_market_marks(&open_position_market_marks, &mut action_log);
     ledger.persist(&config)?;
     diagnostic_log.push(format!(
         "Status snapshot captured {} grouped open position(s).",
